@@ -1,0 +1,89 @@
+[project]
+name = "langchain-lab"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [{ name = "qianyuedu", email = "qianyuedu2@gmail.com" }]
+requires-python = ">=3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "langchain>=1.3.18",
+    "langchain-community>=0.4.2",
+    "langgraph>=1.2.11",
+    "langgraph-cli[inmem]>=0.4.31",
+    "prompt-toolkit>=3.0.53",
+    "pyjwt>=2.13.0",
+    "python-dotenv>=1.2.3",
+    "tiktoken>=0.14.0",
+]
+
+[project.scripts]
+langchain-lab = "langchain_lab.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13.0"]
+build-backend = "uv_build"
+
+# region ====== pytest 配置 ======
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["src/tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
+
+# addopts 数组；注意：这里的 -W 依旧无法抑制 import（收集阶段）抛出的警告
+# 如需屏蔽 langchain_community import警告：powershell设置环境变量
+# $env:PYTHONWARNINGS="ignore::DeprecationWarning:langchain_community"
+addopts = ["-W ignore::DeprecationWarning:langchain_community"]
+
+# filterwarnings = ["ignore::PydanticDeprecatedSince20:pydantic"]
+
+# endregion
+
+
+# region ====== ruff 配置 ======
+[tool.ruff]
+line-length = 150
+target-version = "py313" # 根据你的最小python版本改，py310/py311/py312
+
+[tool.ruff.lint]
+# 基础规则集：E错误,W警告,F格式化,I导入排序,UP现代Python,FA, RUF内置
+select = [
+    "E",   # pycodestyle 错误
+    "W",   # pycodestyle 警告
+    "F",   # pyflakes 未定义变量、未使用导入等
+    "I",   # isort 导入排序（ruff内置，不再需要isort）
+    "UP",  # pyupgrade 现代python语法升级 UP0xx
+    "FA",  # flake8‑async 异步代码检查
+    "RUF", # ruff自己的最佳实践
+    "SIM", # flake8‑simplicity 简化冗余代码
+    "C4",  # 集合/列表推导式优化
+]
+
+# 关闭不需要的规则
+ignore = [
+    # "ANN001", "ANN201", # 业务项目关闭强制注解；库项目打开
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    "E402",
+    "D",      # 关闭docstring文档字符串强制，业务代码一般不需要
+]
+
+[tool.ruff.lint.per-file-ignores]
+# init 文件经常空，放宽
+"__init__.py" = ["F401"]     # 允许__init__.py里面故意import导出对外API
+"tests/**/*.py" = ["SIM105"] # 测试脚本允许简单冗余
+
+[tool.ruff.format]
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+# 导入分组标准：标准库 / 第三方库 / 本地项目 / 本地相对
+known-first-party = ["langchain_lab"] # 包名而非项目名！
+split-on-trailing-comma = true
+
+# endregion
