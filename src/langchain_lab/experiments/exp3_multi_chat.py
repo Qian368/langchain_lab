@@ -1,20 +1,4 @@
-"""实验2：单轮对话（single——chat）：工具调用 + 流式输出 + 最小循环"""
-
-"""
-逻辑简图：
-main()外层循环（持续聊天）
-├─ 用户输入HumanMessage追加到messages
-└─ 调用 _single_chat_loop 处理当前问题
-    ├─ 初始化局部：tool_call_count=0，llm_loop_count=0
-    └─ while True（Agent内层迭代：LLM ↔ 工具）
-        ├─ 判断是否超限 → 构建临时提示
-        ├─ copy消息副本，注入临时提示
-        ├─ stream流式输出，合并full_chunk
-        ├─ AI消息存入主messages
-        ├─ 检查是否命中上限，命中则break
-        ├─ 如果有tool_calls：逐个执行工具，追加ToolMessage，continue
-        └─ 无tool_calls：break返回更新后的messages
-"""
+"""实验2：多轮对话（single——chat）：工具调用 + 流式输出 + 最小循环 + 美化终端交互"""
 
 import asyncio
 import json
@@ -22,17 +6,17 @@ from typing import cast
 
 from colorama import Fore, init
 from langchain.chat_models import BaseChatModel
-from langchain_community.tools import BaseTool
+from langchain.tools import BaseTool
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables.base import Runnable
 from prompt_toolkit import PromptSession
 
 from langchain_lab.core.llm import ModelNotFoundError, get_llm, logging
 from langchain_lab.core.tools import get_tools
-from langchain_lab.util.prompt_style import Printer
+from langchain_lab.util.prompt_style import Printer, bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印
-# logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 init(autoreset=True)
 
@@ -44,7 +28,7 @@ MAX_TOOL_CALLS = 4
 
 async def main():
     session = PromptSession()
-    print("\n---实验2：工具调用---")
+    printer.output("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
 
     try:
         llm = get_llm()
@@ -53,7 +37,14 @@ async def main():
 
         # 第一轮：模型决定调用工具
         system_prompt = (
-            await session.prompt_async("请输入你的系统提示词> ", style=printer.style) or "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务"
+            await session.prompt_async(
+                printer.prompt("请输入你的系统提示词(shift + enter 换行)：\n> ", style_name="prompt"),
+                style=printer.style,
+                key_bindings=bindings,
+                multiline=True,
+                prompt_continuation=printer.prompt("> ", style_name="prompt"),
+            )
+            or "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务"
         )
 
         messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
@@ -62,9 +53,18 @@ async def main():
 
         # 多轮对话循环
         while True:
-            human_prompt = await session.prompt_async("请向你的助手发送消息> ", style=printer.style) or "我还没想好我的问题，你给我一点建议"
+            human_prompt = (
+                await session.prompt_async(
+                    printer.prompt("请向你的助手发送消息(shift + enter 换行)：\n> ", style_name="prompt"),
+                    style=printer.style,
+                    key_bindings=bindings,
+                    multiline=True,
+                    prompt_continuation=printer.prompt("> ", style_name="prompt"),
+                )
+                or "我还没想好我的问题，你给我一点建议"
+            )
             if human_prompt == "0":
-                printer.warning("X" * 50 + "用户选择终止" + "X" * 50)
+                printer.warning("X" * 50 + " 用户选择终止 " + "X" * 50 + "\n\n")
                 break
             messages.append(HumanMessage(content=human_prompt))
             messages = await _single_chat_loop(tools=tools, llm_with_tools=llm_with_tools, messages=messages)
@@ -84,7 +84,7 @@ async def _single_chat_loop(
     """单次对话循环完成任务"""
     tool_call_count = 0
     llm_loop_count = 0
-    print(Fore.BLUE + "=" * 30 + "你发起调用 llm " + "=" * 30)
+    print(Fore.BLUE + "=" * 30 + "用户发起调用 llm " + "=" * 30)
     while True:
         injected_llm_limit_msg: SystemMessage | None = None
         injected_tool_limit_msg: SystemMessage | None = None
@@ -150,7 +150,7 @@ async def _single_chat_loop(
 
         # 最后答复后退出 while
         if llm_loop_count > MAX_LLM_LOOP + 1 or tool_call_count > MAX_TOOL_CALLS:  # 因为LLM注入系统消息到这里多了一次计数
-            print(Fore.RED + "本次对话轮数或工具调用次数已耗尽~请继续")
+            printer.error("=" * 35 + " 本次对话轮数或工具调用次数已耗尽~ " + "=" * 35)
             break
 
         # region 笔记：

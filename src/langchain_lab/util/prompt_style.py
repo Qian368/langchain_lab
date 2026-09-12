@@ -2,7 +2,23 @@ from enum import StrEnum
 
 from prompt_toolkit import print_formatted_text
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
+
+bindings = KeyBindings()
+
+
+# Enter = 提交
+@bindings.add(Keys.Enter)
+def _(event):
+    event.current_buffer.validate_and_handle()
+
+
+# Shift+Enter = 换行
+@bindings.add(Keys.Escape, Keys.Enter)  # Shift+Tab 的底层键名
+def _(event):
+    event.current_buffer.insert_text("\n")
 
 
 class Color(StrEnum):
@@ -101,10 +117,10 @@ class Theme:
 
     @staticmethod
     def build(
-        color: Color | None = None,
-        effect: Effect | None = None,
-        background: Background | None = None,
-        highlight: Highlight | None = None,
+        color: Color | None = None,  # 前景色
+        effect: Effect | None = None,  # 效果（加粗等）
+        background: Background | None = None,  # 背景色
+        highlight: Highlight | None = None,  # 文字高亮
     ) -> str:
         """构建样式字符串"""
         parts = []
@@ -123,25 +139,27 @@ class Theme:
         """获取完整样式"""
         return Style.from_dict(
             {
+                # "风格名": "配置"
+                # 常规区
                 "prompt": cls.build(Color.ANSI_BLUE, Effect.BOLD),
                 "output": cls.build(Color.ANSI_BLUE, Effect.BOLD),
-                "output1": cls.build(background=Background.BG_BLUE, effect=Effect.BOLD),
-                "output2": cls.build(background=Background.BG_YELLOW, effect=Effect.BOLD),
-                "output3": cls.build(Color.ANSI_BLUE, Effect.BOLD),
-                "output4": cls.build(Color.ANSI_BLUE, Effect.BOLD),
-                "output5": cls.build(Color.ANSI_BLUE, Effect.BOLD),
                 "error": cls.build(Color.ANSI_RED, Effect.BOLD),
                 "success": cls.build(Color.ANSI_GREEN),
                 "warning": cls.build(Color.ANSI_YELLOW, Effect.BOLD),
                 "info": cls.build(Color.ANSI_CYAN),
                 "highlight": cls.build(highlight=Highlight.FG_ANSI_YELLOW),
+                # 自定义输出
+                "output1": cls.build(background=Background.BG_BLUE, effect=Effect.BOLD),
+                "output2": cls.build(background=Background.BG_YELLOW, effect=Effect.BOLD),
+                "output3": cls.build(Color.ANSI_BLUE, Effect.BOLD),
+                "output4": cls.build(Color.ANSI_BLUE, Effect.BOLD),
+                "output5": cls.build(Color.ANSI_BLUE, Effect.BOLD),
             }
         )
 
 
 # 使用
 # style = Theme.get_style()
-
 
 # 封装成更简洁的 API
 
@@ -150,42 +168,45 @@ class Printer:
     def __init__(self):
         self.style = Theme.get_style()
 
-    def _format(self, style_name: str, text: str):
+    # 打印到终端的内部方法
+    def _format(self, text: str, style_name: str):
         """统一处理，完全避免 XML 解析"""
         print_formatted_text(FormattedText([(f"class:{style_name}", text)]), style=self.style)
 
     # 用法示例：
     # printer.prompt("请向你的助手发送消息> ", "output")
-    def prompt(self, text: str, style_name: str = "prompt"):
+    def prompt(self, text: str, style_name: str = "prompt"):  # 从终端获取输入的方法
         """带样式的输入提示"""
         return FormattedText([(f"class:{style_name}", text)])
 
+    # 常规区
     def output(self, text: str):
-        self._format("output", text)
-
-    def key_label(self, text: str):
-        self._format("output1", text)
-
-    def tool_label(self, text: str):
-        self._format("output2", text)
-
-    def output3(self, text: str):
-        self._format("output3", text)
-
-    def output4(self, text: str):
-        self._format("output4", text)
-
-    def output5(self, text: str):
-        self._format("output5", text)
+        self._format(text, "output")
 
     def error(self, text: str):
-        self._format("error", text)
+        self._format(text, "error")
 
     def success(self, text: str):
-        self._format("success", text)
+        self._format(text, "success")
 
     def warning(self, text: str):
-        self._format("warning", text)
+        self._format(text, "warning")
+
+    # 自定义区
+    def key_label(self, text: str):
+        self._format(text, "output1")
+
+    def tool_label(self, text: str):
+        self._format(text, "output2")
+
+    def output3(self, text: str):
+        self._format(text, "output3")
+
+    def output4(self, text: str):
+        self._format(text, "output4")
+
+    def output5(self, text: str):
+        self._format(text, "output5")
 
 
 # 使用
