@@ -1,0 +1,9 @@
+[
+    {
+        "name": "multiply",
+        "args": "{\"a\": 23, \"b\": 17}",
+        "id": "01a08f314f5a3f9a30903cff1120026f",
+        "index": 0,
+        "type": "tool_call_chunk"
+    }
+]

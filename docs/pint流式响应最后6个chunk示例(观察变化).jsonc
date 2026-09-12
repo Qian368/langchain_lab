@@ -1,0 +1,126 @@
+[
+    // 倒数 6
+    {
+        "content": "：",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "AIMessageChunk",
+        "name": null,
+        "id": "lc_run--01a08f31-45e3-7073-a222-1127fa71a186",
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null,
+        "tool_call_chunks": [],
+        "chunk_position": null
+    },
+    // 倒数 5
+    {
+        "content": "",
+        "additional_kwargs": {
+            "tool_calls": [
+                {
+                    "id": "01a08f314f5a3f9a30903cff1120026f",
+                    "index": 0,
+                    "type": "function",
+                    "function": {
+                        "name": "multiply",
+                        "arguments": "{\"a\": 23, \"b\": 17}"
+                    }
+                }
+            ]
+        },
+        "response_metadata": {},
+        "type": "AIMessageChunk",
+        "name": null,
+        "id": "lc_run--01a08f31-45e3-7073-a222-1127fa71a186",
+        "tool_calls": [
+            {
+                "name": "multiply",
+                "args": {
+                    "a": 23,
+                    "b": 17
+                },
+                "id": "01a08f314f5a3f9a30903cff1120026f",
+                "type": "tool_call"
+            }
+        ],
+        "invalid_tool_calls": [],
+        "usage_metadata": null,
+        "tool_call_chunks": [
+            {
+                "name": "multiply",
+                "args": "{\"a\": 23, \"b\": 17}",
+                "id": "01a08f314f5a3f9a30903cff1120026f",
+                "index": 0,
+                "type": "tool_call_chunk"
+            }
+        ],
+        "chunk_position": null
+    },
+    // 倒数 4
+    [
+        {
+            "name": "multiply",
+            "args": "{\"a\": 23, \"b\": 17}",
+            "id": "01a08f314f5a3f9a30903cff1120026f",
+            "index": 0,
+            "type": "tool_call_chunk"
+        }
+    ],
+    // 倒数 3
+    {
+        "content": "",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "AIMessageChunk",
+        "name": null,
+        "id": "lc_run--01a08f31-45e3-7073-a222-1127fa71a186",
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null,
+        "tool_call_chunks": [],
+        "chunk_position": null
+    },
+    // 倒数 2
+    {
+        "content": "",
+        "additional_kwargs": {},
+        "response_metadata": {
+            "finish_reason": "tool_calls",
+            "token_usage": {
+                "prompt_tokens": 244,
+                "completion_tokens": 46,
+                "total_tokens": 290,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 20
+                }
+            },
+            "model_name": "glm-5.2"
+        },
+        "type": "AIMessageChunk",
+        "name": null,
+        "id": "lc_run--01a08f31-45e3-7073-a222-1127fa71a186",
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null,
+        "tool_call_chunks": [],
+        "chunk_position": null
+    },
+    // 倒数 1
+    {
+        "content": "",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "AIMessageChunk",
+        "name": null,
+        "id": "lc_run--01a08f31-45e3-7073-a222-1127fa71a186",
+        "tool_calls": [],
+        "invalid_tool_calls": [],
+        "usage_metadata": null,
+        "tool_call_chunks": [],
+        "chunk_position": "last"
+    },
+]

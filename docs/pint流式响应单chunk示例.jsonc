@@ -1,0 +1,13 @@
+{
+    "content": "帮你",
+    "additional_kwargs": {},
+    "response_metadata": {},
+    "type": "AIMessageChunk",
+    "name": null,
+    "id": "lc_run--01a08f31-45e3-7073-a222-1127fa71a186",
+    "tool_calls": [],
+    "invalid_tool_calls": [],
+    "usage_metadata": null,
+    "tool_call_chunks": [],
+    "chunk_position": null
+}
