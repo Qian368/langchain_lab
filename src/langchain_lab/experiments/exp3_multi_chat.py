@@ -13,7 +13,8 @@ from prompt_toolkit import PromptSession
 
 from langchain_lab.core.llm import ModelNotFoundError, get_llm, logging
 from langchain_lab.core.tools import get_tools
-from langchain_lab.util.prompt_style import Printer, bindings
+from langchain_lab.util.prompt_style import Printer
+from langchain_lab.util.prompt_style import bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -28,7 +29,7 @@ MAX_TOOL_CALLS = 4
 
 async def main():
     session = PromptSession()
-    printer.output("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
+    printer.begin("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
 
     try:
         llm = get_llm()
@@ -38,11 +39,11 @@ async def main():
         # 第一轮：模型决定调用工具
         system_prompt = (
             await session.prompt_async(
-                printer.prompt("请输入你的系统提示词(shift + enter 换行)：\n> ", style_name="prompt"),
+                printer.message("请输入你的系统提示词(shift + enter 换行)：\n> ", style_name=printer.style_name.MESSAGE),
                 style=printer.style,
                 key_bindings=bindings,
                 multiline=True,
-                prompt_continuation=printer.prompt("> ", style_name="prompt"),
+                prompt_continuation=printer.message("> ", style_name=printer.style_name.MESSAGE),
             )
             or "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务"
         )
@@ -55,11 +56,11 @@ async def main():
         while True:
             human_prompt = (
                 await session.prompt_async(
-                    printer.prompt("请向你的助手发送消息(shift + enter 换行)：\n> ", style_name="prompt"),
+                    printer.message("请向你的助手发送消息(shift + enter 换行)：\n> ", style_name=printer.style_name.MESSAGE),
                     style=printer.style,
                     key_bindings=bindings,
                     multiline=True,
-                    prompt_continuation=printer.prompt("> ", style_name="prompt"),
+                    prompt_continuation=printer.message("> ", style_name=printer.style_name.MESSAGE),
                 )
                 or "我还没想好我的问题，你给我一点建议"
             )
@@ -84,6 +85,7 @@ async def _single_chat_loop(
     """单次对话循环完成任务"""
     tool_call_count = 0
     llm_loop_count = 0
+    tool_names = [tool.name for tool in tools]
     print(Fore.BLUE + "=" * 30 + "用户发起调用 llm " + "=" * 30)
     while True:
         injected_llm_limit_msg: SystemMessage | None = None
@@ -113,8 +115,9 @@ async def _single_chat_loop(
         # 使用拷贝后的current_messages调用stream，原始messages不受临时标记影响！
         result = llm_with_tools.stream(current_messages)
 
-        printer.key_label("模型答复> ")
+        printer.label_blue("模型答复> ")
         full_chunk: AIMessage | AIMessageChunk | None = None
+        printer.set_style(printer.style_name.MAGENTA)
         for chunk in result:
             # region：调试
             # # 调试用1：观察 chunk 的所有属性和方法
@@ -139,7 +142,8 @@ async def _single_chat_loop(
             if chunk.content:
                 print(chunk.content, end="", flush=True)
         print()
-        printer.key_label("<答复完成")
+        printer.reset_style()
+        printer.label_blue("<答复完成")
 
         # 没有流式内容输出，直接终止循环
         if not full_chunk:
@@ -161,7 +165,7 @@ async def _single_chat_loop(
         # endregion
         # 判断是否需要调用工具：流式打印结束后，拿到完整解析好的 tool_calls
         if full_chunk.tool_calls:
-            printer.tool_label("有工具执行> ")
+            printer.label_yellow("有工具执行> ")
             print("-" * 25 + " 工具执行详情 " + "-" * 25)
             print("llm 想调用的全部工具：")
             for i, tc in enumerate(full_chunk.tool_calls, 1):
@@ -181,7 +185,9 @@ async def _single_chat_loop(
                 target_tool = next((tool for tool in tools if tool.name == tc["name"]), None)
 
                 if target_tool is None:
-                    messages.append(ToolMessage(content=f"未知工具：{tc['name']}", tool_call_id=tc["id"], name=tc["name"]))
+                    messages.append(
+                        ToolMessage(content=f"未发现工具：{tc['name']}，能用有效工具为:{tool_names}", tool_call_id=tc["id"], name=tc["name"])
+                    )
                     print(f"📢向大哥报告：llm 调用了不存在的工具{[i]}：{tc['name']}")
                 else:
                     print(f"执行工具{[i]}：{tc['name']}")

@@ -23,8 +23,11 @@ def show_menu():
 def run_experiment(module_name: str):
     """动态导入并运行实验模块，自动兼容同步/异步main"""
     try:
-        module = importlib.import_module(f"langchain_lab.experiments.{module_name}")
-        main_func = module.main
+        module_path = f"langchain_lab.experiments.{module_name}"
+        module = importlib.import_module(module_path)
+
+        module = importlib.reload(module)  # 强制重新加载模块，重读磁盘源码
+        main_func = module.main  # 不能再 reload 前取出main，否则， reload 后不会刷新 main
 
         # 判断是否为协程函数
         if inspect.iscoroutinefunction(main_func):
