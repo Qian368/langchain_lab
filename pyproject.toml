@@ -35,7 +35,7 @@ testpaths = ["src/tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-asyncio_mode = "auto"
+# asyncio_mode = "auto"
 
 # addopts 数组；注意：这里的 -W 依旧无法抑制 import（收集阶段）抛出的警告
 # 如需屏蔽 langchain_community import警告：powershell设置环境变量
@@ -86,9 +86,7 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-]
+dev = ["pytest>=9.1.1"]
 
 [tool.ruff.lint.isort]
 # 导入分组标准：标准库 / 第三方库 / 本地项目 / 本地相对

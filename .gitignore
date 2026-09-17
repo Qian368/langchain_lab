@@ -6,7 +6,8 @@ dist/
 wheels/
 .ruff_cache/
 *.egg-info
-gen_tree.py
+.pytest_cache
+logs/
 
 # Virtual environments
 .venv

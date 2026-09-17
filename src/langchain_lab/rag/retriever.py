@@ -17,6 +17,7 @@ class SimpleRetriever:
         """
         document：知识库文档（已切分好的文本块）
         top_k：每次检索返回几条最相关的
+        least_score：最低相似度分数过滤
         """
 
         self.documents = documents
@@ -41,7 +42,7 @@ class SimpleRetriever:
 
         if len(candidate_indices) == 0:
             # 返回空列表 + 打印提示，方便调试
-            print(f"[Retriever] 未找到相似度超过 {self.least_score} 的文档")
+            logger.warning(f"[Retriever] 未找到相似度超过 {self.least_score} 的文档")
             return []
 
         order = np.argsort(-scores[candidate_indices])[: self.top_k]
@@ -54,7 +55,7 @@ class SimpleRetriever:
     def build_prompt(self, query: str) -> str:
         """检索 + 拼装 Prompt，直接给 LLM 用"""
         result = self.retrieve(query=query)
-        context = "\n\n".join([doc for _, doc in result])
+        context = "\n\n".join([doc for _, doc in result]) if result else "抱歉，知识库中暂无相关信息"
         prompt = f"""请根据以下资料回答问题：
 资料：
 {context}

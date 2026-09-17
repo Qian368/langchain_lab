@@ -76,7 +76,6 @@ def retriever_test():
         "养老金申领需要达到法定退休年龄",
         "申领时需要连续缴费满15年",
         "社保转移可以通过当地人社局线上办理",
-        "养老保险缴费年限越长，退休后领取的养老金越高",
         "医保报销需要保留原始发票和处方单",
         "生育津贴需要在产后90天内申请",
     ]
@@ -87,8 +86,12 @@ def retriever_test():
     # 测试检索
     query = "我缴费多少年才能领养老金？"
     print("===检索结果===")
-    for score, doc in retriever.retrieve(query):
-        print(f"相似度分数：{score:.4f}；内容：{doc}")
+    result = retriever.retrieve(query)
+    if not result:
+        print("抱歉，知识库中暂无相关信息")
+    else:
+        for score, doc in result:
+            print(f"相似度分数：{score:.4f}；内容：{doc}")
 
     # 测试拼装 Prompt
     print("\n=== 生成的 Prompt ===")
