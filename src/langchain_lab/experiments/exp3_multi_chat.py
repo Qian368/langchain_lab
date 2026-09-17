@@ -13,8 +13,7 @@ from prompt_toolkit import PromptSession
 
 from langchain_lab.core.llm import ModelNotFoundError, get_llm, logging
 from langchain_lab.core.tools import get_tools
-from langchain_lab.util.prompt_style import Printer
-from langchain_lab.util.prompt_style import bindings
+from langchain_lab.util.prompt_style import Printer, bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印
 logging.getLogger("httpx").setLevel(logging.WARNING)

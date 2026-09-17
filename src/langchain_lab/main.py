@@ -11,11 +11,12 @@ def show_menu():
     print("\n" + "=" * 50)
     print("LangChain 实验台")
     print("=" * 50)
-    print("1. LLM 基础调用（invoke / stream / batch）")
-    print("2. 单轮对话（single——chat）：工具调用 + 流式输出 + 最小循环")
-    print("3. 多轮对话（single——chat）：工具调用 + 流式输出 + 最小循环 + 美化终端交互")
-    print("4. 提示词模板")
-    print("5. LCEL 管道")
+    print("实验1： LLM 基础调用（invoke / stream / batch）")
+    print("实验2： 单轮对话（single——chat）：工具调用 + 流式输出 + 最小循环")
+    print("实验3： 多轮对话（single——chat）：工具调用 + 流式输出 + 最小循环 + 美化终端交互")
+    print("实验4： 提示词模板")
+    print("实验5： LCEL 管道")
+    print("实验6：文本向量化于检索")
     print("0. 退出")
     print("=" * 50)
 
@@ -45,6 +46,7 @@ def main():
         "3": "exp3_multi_chat",
         "4": "exp4_prompt_template",
         "5": "exp5_lcel_pipeline",
+        "6": "exp6_base_retrieve",
     }
 
     while True:

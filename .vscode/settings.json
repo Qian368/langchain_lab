@@ -1,0 +1,22 @@
+{
+    "python.analysis.diagnosticMode": "openFilesOnly",
+    "python.analysis.useLibraryCodeForTypes": true,
+    "python.analysis.packageIndexDepths": [
+        {
+            "name": "sentence_transformers",
+            "depth": 1
+        },
+        {
+            "name": "transformers",
+            "depth": 1
+        },
+        {
+            "name": "huggingface_hub",
+            "depth": 1
+        },
+        {
+            "name": "tokenizers",
+            "depth": 1
+        }
+    ]
+}
