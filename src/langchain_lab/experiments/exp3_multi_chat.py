@@ -28,13 +28,14 @@ MAX_TOOL_CALLS = 4
 
 async def main():
     session = PromptSession()
-    printer.begin("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
 
     try:
         llm = await asyncio.to_thread(get_llm)
         tools = get_tools()
         llm_with_tools = llm.bind_tools(tools=tools)
+        printer.reset_all_state()
 
+        printer.begin("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
         # 第一轮：模型决定调用工具
         system_prompt = (
             await session.prompt_async(
@@ -119,8 +120,8 @@ async def _single_chat_loop(
         result = llm_with_tools.stream(current_messages)
 
         printer.label_blue("模型答复> ")
+
         full_chunk: AIMessage | AIMessageChunk | None = None
-        printer.set_style(printer.style_name.MAGENTA)
         for chunk in result:
             # region：调试
             # # 调试用1：观察 chunk 的所有属性和方法
@@ -143,9 +144,10 @@ async def _single_chat_loop(
 
             # 打印文本片段
             if chunk.content:
-                print(chunk.content, end="", flush=True)
+                # print(chunk.content, end="", flush=True)
+                printer.stream_chunk(chunk.content, style_name=printer.style_name.MAGENTA)
+
         print()
-        printer.reset_style()
         printer.label_blue("<答复完成")
 
         # 没有流式内容输出，直接终止循环

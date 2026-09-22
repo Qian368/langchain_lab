@@ -28,7 +28,7 @@ class LLMInstanceConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM 多实例配置跟对象"""
 
-    default_instance: str | None = Field(default=None)
+    default_instance: str | None = Field(default=None, description="默认模型实例")
     instances: dict[str, LLMInstanceConfig] = Field(default_factory=lambda: {"default": LLMInstanceConfig()}, description="LLM 实例字典")
 
     def available_instances(self) -> dict[str, LLMInstanceConfig]:

@@ -1,5 +1,6 @@
-# ============ 不测试连通性，配置要求满足即可用 =============
-default_instance: 
+# ============ 不测试连通性，配置满足要求即可用 =============
+# 实例名自定义
+default_instance: zhipuai
 
 instances:
   deepseek:
@@ -10,7 +11,7 @@ instances:
     temperature: 0.7
     max_tokens: 3000
 
-  zhipu:
+  zhipuai:
     provider: openai
     model: glm-5.2
     api_key: ${ZHIPUAI_API_KEY}

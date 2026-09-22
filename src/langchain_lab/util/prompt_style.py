@@ -9,6 +9,7 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from enum import StrEnum
+import threading
 from typing import ClassVar
 
 from prompt_toolkit import PromptSession
@@ -165,6 +166,66 @@ class StyleName(StrEnum):
     LABEL_RED = "label_red"
 
 
+class Theme:
+    """
+    主题配置类，返回通用 style：
+
+    用法示例：
+    style = Theme.get_style()
+    """
+
+    @staticmethod
+    def build(
+        color: Color | None = None,  # 前景色
+        effect: Effect | None = None,  # 效果（加粗等）
+        background: Background | None = None,  # 背景色
+        highlight: Highlight | None = None,  # 文字高亮
+    ) -> str:
+        """构建样式字符串"""
+        parts = []
+        if background:
+            parts.append(background.value)
+        if highlight:
+            parts.append(highlight.value)
+        if color:
+            parts.append(color.value)
+        if effect:
+            parts.append(effect.value)
+        return " ".join(parts)
+
+    @classmethod
+    def get_style_map(cls) -> dict[str, str]:
+        style_map: dict[str, str] = {
+            # 标准区
+            StyleName.OUTPUT: cls.build(None),
+            StyleName.MESSAGE: cls.build(Color.ANSI_BLUE, Effect.BOLD),
+            # 纯色区
+            StyleName.MAGENTA: cls.build(Color.MAGENTA),
+            StyleName.BLUE: cls.build(Color.ANSI_BLUE),
+            StyleName.GREEN: cls.build(Color.GREEN),
+            StyleName.YELLOW: cls.build(Color.YELLOW),
+            StyleName.RED: cls.build(Color.RED),
+            # 状态区
+            StyleName.BEGIN: cls.build(Color.ANSI_BLUE, Effect.BOLD),
+            StyleName.SUCCESS: cls.build(Color.ANSI_GREEN, Effect.BOLD),
+            StyleName.WARNING: cls.build(Color.ANSI_YELLOW, Effect.BOLD),
+            StyleName.ERROR: cls.build(Color.ANSI_RED, Effect.BOLD),
+            StyleName.INFO: cls.build(Color.ANSI_CYAN),
+            StyleName.HIGHLIGHT: cls.build(highlight=Highlight.FG_ANSI_YELLOW),
+            # 标签区
+            StyleName.LABEL_BLUE: cls.build(background=Background.BG_BLUE, effect=Effect.BOLD),
+            StyleName.LABEL_GREEN: cls.build(background=Background.BG_GREEN, effect=Effect.BOLD),
+            StyleName.LABEL_YELLOW: cls.build(background=Background.BG_YELLOW, effect=Effect.BOLD),
+            StyleName.LABEL_RED: cls.build(background=Background.BG_RED, effect=Effect.BOLD),
+        }
+        return style_map
+
+    @classmethod
+    def get_style(cls) -> Style:
+        """获取完整样式"""
+        return Style.from_dict(cls.get_style_map())
+
+
 class ANSI:
     """从 StyleName 枚举动态生成 ANSI 码"""
 
@@ -279,66 +340,6 @@ class ANSI:
         return f"\033[{';'.join(codes)}m" if codes else ""
 
 
-class Theme:
-    """
-    主题配置类，返回通用 style：
-
-    用法示例：
-    style = Theme.get_style()
-    """
-
-    @staticmethod
-    def build(
-        color: Color | None = None,  # 前景色
-        effect: Effect | None = None,  # 效果（加粗等）
-        background: Background | None = None,  # 背景色
-        highlight: Highlight | None = None,  # 文字高亮
-    ) -> str:
-        """构建样式字符串"""
-        parts = []
-        if background:
-            parts.append(background.value)
-        if highlight:
-            parts.append(highlight.value)
-        if color:
-            parts.append(color.value)
-        if effect:
-            parts.append(effect.value)
-        return " ".join(parts)
-
-    @classmethod
-    def get_style_map(cls) -> dict[str, str]:
-        style_map: dict[str, str] = {
-            # 标准区
-            StyleName.OUTPUT: cls.build(None),
-            StyleName.MESSAGE: cls.build(Color.ANSI_BLUE, Effect.BOLD),
-            # 纯色区
-            StyleName.MAGENTA: cls.build(Color.MAGENTA),
-            StyleName.BLUE: cls.build(Color.ANSI_BLUE),
-            StyleName.GREEN: cls.build(Color.GREEN),
-            StyleName.YELLOW: cls.build(Color.YELLOW),
-            StyleName.RED: cls.build(Color.RED),
-            # 状态区
-            StyleName.BEGIN: cls.build(Color.ANSI_BLUE, Effect.BOLD),
-            StyleName.SUCCESS: cls.build(Color.ANSI_GREEN, Effect.BOLD),
-            StyleName.WARNING: cls.build(Color.ANSI_YELLOW, Effect.BOLD),
-            StyleName.ERROR: cls.build(Color.ANSI_RED, Effect.BOLD),
-            StyleName.INFO: cls.build(Color.ANSI_CYAN),
-            StyleName.HIGHLIGHT: cls.build(highlight=Highlight.FG_ANSI_YELLOW),
-            # 标签区
-            StyleName.LABEL_BLUE: cls.build(background=Background.BG_BLUE, effect=Effect.BOLD),
-            StyleName.LABEL_GREEN: cls.build(background=Background.BG_GREEN, effect=Effect.BOLD),
-            StyleName.LABEL_YELLOW: cls.build(background=Background.BG_YELLOW, effect=Effect.BOLD),
-            StyleName.LABEL_RED: cls.build(background=Background.BG_RED, effect=Effect.BOLD),
-        }
-        return style_map
-
-    @classmethod
-    def get_style(cls) -> Style:
-        """获取完整样式"""
-        return Style.from_dict(cls.get_style_map())
-
-
 # endregion
 
 
@@ -371,34 +372,24 @@ class Printer:
         )
         # self._out = create_output()  # 保留给 prompt_toolkit 用
 
+    # region
     # 打印到终端的内部方法
     # def _format(self, text: str, style_name: StyleName):  # 部分自动转化为亮色版，不可控，此api不采用
     #     """统一处理，完全避免 XML 解析"""
     # print_formatted_text(FormattedText([(f"class:{style_name.value}", text)]), style=self.style)
-    def _format(self, text: str, style_name: StyleName, *, bright: bool = False):
-        """非流式单行输出。
-        默认走原生 ANSI；bright=True 时输出自定义真彩色高亮。
+    def _format(self, text: str, style_name: StyleName, *, bright: bool = False, end: str = "\n"):
+        """非流式单行输出
+        - 默认走原生 ANSI；bright=True 时输出自定义真彩色高亮。
         """
         outer_style = self._current_style
-        if outer_style:
-            sys.stdout.write(ANSI.RESET)
 
-        if bright:
-            ansi_code = ANSI.from_style_name_bright(style_name)
-            if ansi_code:
-                sys.stdout.write(ansi_code)
-            sys.stdout.write(text)
-            sys.stdout.write(ANSI.RESET)
-        else:
-            ansi_code = ANSI.from_style_name(style_name)
-            if ansi_code:
-                sys.stdout.write(ansi_code)
-            sys.stdout.write(text)
-            sys.stdout.write(ANSI.RESET)
+        inner_code = ANSI.from_style_name_bright(style_name) if bright else ANSI.from_style_name(style_name)
 
-        if outer_style:
-            sys.stdout.write(outer_style)
-        sys.stdout.write("\n")
+        # 完整拼好再一次性写出，避免prompt_toolkit hook中间重置颜色
+        # 有外层样式：先重置 → 写本行样式 → 文本 → 重置 → 恢复外层
+        output = f"{ANSI.RESET}{inner_code}{text}{ANSI.RESET}{outer_style}{end}" if outer_style else f"{inner_code}{text}{ANSI.RESET}{end}"
+
+        sys.stdout.write(output)
         sys.stdout.flush()
 
     # 标准区
@@ -493,9 +484,10 @@ class Printer:
     def label_red(self, text: str, *, bright: bool = False):
         self._format(text, StyleName.LABEL_RED, bright=bright)
 
+    # endregion
     # region 单次样式设置，流式输出样式配置
     def set_style(self, style_name: StyleName):
-        """设置当前输出样式（支持嵌套），兼容 init(autoreset=True)"""
+        """不推荐直接使用：设置当前输出样式（支持嵌套），兼容 init(autoreset=True)"""
         # 第一次进入样式区时，保存原始 stdout 并替换为 sys.__stdout__
         if not self._stdout_stack:
             self._stdout_stack.append(sys.stdout)
@@ -510,8 +502,8 @@ class Printer:
         sys.stdout.write(self._current_style)
         sys.stdout.flush()
 
-    def reset_style(self):
-        """重置为外层样式，如果已退出所有样式则恢复默认"""
+    def recover_style(self):
+        """不推荐直接使用：重置为外层样式，如果已退出所有样式则恢复默认"""
         # 清掉当前所有样式
         sys.stdout.write(ANSI.RESET)
         sys.stdout.flush()
@@ -529,22 +521,37 @@ class Printer:
         if not self._style_stack and self._stdout_stack:
             sys.stdout = self._stdout_stack.pop()
 
-    def stream_chunk(self, text: str):
+    def reset_all_state(self):
+        """备用方法：强制清空内存样式栈，恢复终端默认状态"""
+        self._style_stack.clear()
+        self._current_style = ""
+        sys.stdout.write(ANSI.RESET)
+        sys.stdout.flush()
+
+    def sync_terminal_from_stack(self):
+        """备用方法：强制对齐终端状态到栈记录的状态"""
+        sys.stdout.write(ANSI.RESET)
+        if self._current_style:
+            sys.stdout.write(self._current_style)
+        sys.stdout.flush()
+
+    def stream_chunk(
+        self,
+        chunk: str,
+        style_name: StyleName = StyleName.OUTPUT,
+        end: str = "",
+        *,
+        bright: bool = False,
+    ):
         """
         输出文本块，使用当前生效的样式
-
-        Typical usage：
-
-        printer = Printer()
-        printer.stream_out("出错了")
         """
-        sys.stdout.write(text)
-        sys.stdout.flush()
+        self._format(chunk, style_name, bright=bright, end=end)
 
     @contextmanager
     def stream_style(self, style_name: StyleName) -> Generator[None]:
         """
-        上下文管理器，进入时设置样式，退出时自动重置
+        上下文管理器，进入时设置样式，退出时自动重置 **（不推荐异步场景使用）**
 
         Typical usage:
 
@@ -560,7 +567,7 @@ class Printer:
         try:
             yield
         finally:
-            self.reset_style()
+            self.recover_style()
 
     # endregion
 

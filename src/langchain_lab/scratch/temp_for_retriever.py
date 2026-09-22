@@ -9,6 +9,7 @@ def temp():
     test_final_retriever()
     pass
 
+
 if __name__ == "__main__":
     temp()
 
@@ -41,6 +42,7 @@ def test_simple_retriever():
     # 测试拼装 Prompt
     print("\n=== 生成的 Prompt ===")
     print(retriever.build_prompt(query))
+
 
 def test_retriever():
     from langchain_lab.rag.retriever import Document, Retriever
@@ -91,6 +93,7 @@ def test_retriever():
     print("\n=== 生成的 Prompt ===")
     print(retriever.build_content(query))
 
+
 def test_save_retriever():
     from langchain_lab.rag.retriever import Document, Retriever, serialize_ret_result
 
@@ -131,6 +134,7 @@ def test_save_retriever():
     res = retriever2.retrieve("我缴费多少年才能领养老金？")
     print(json.dumps(serialize_ret_result(res), ensure_ascii=False, indent=2))
 
+
 def test_add_retriever():
     from langchain_lab.rag.retriever import Document, Retriever
 
@@ -170,6 +174,7 @@ def test_add_retriever():
     for score, doc in results:
         print(f"{score:.4f}  {doc.id}  {doc.metadata}  {doc.text}")
 
+
 def test_final_retriever():
     from langchain_lab.rag.loader import FileLoader
     from langchain_lab.rag.retriever import Retriever
@@ -181,7 +186,7 @@ def test_final_retriever():
     note_folder = get_folder()
     kb_folder = "kb_index"
 
-    loader = FileLoader(note_folder)   # 笔记根目录
+    loader = FileLoader(note_folder)  # 笔记根目录
     raw_docs = loader.load_directory(note_folder)  # 批量加载所有 md/txt
 
     # 2. 切分
@@ -201,14 +206,13 @@ def test_final_retriever():
 
     # ========== 前：构建入库；后：载入检索 ===========
     kb_folder = "kb_index"
-    retriever= Retriever.load(kb_folder)
+    retriever = Retriever.load(kb_folder)
 
     # 4. 检索
     results = retriever.retrieve("Python的模块的导入与加载具有什么机制？")
 
     input_value = ""
     while True:
-
         for score, doc in results:
             print("-" * 100 + "\n" + f"得分：{score:.4f}  文件来源：[{doc.metadata.get('source')}] \n文件内容：{doc.text[:500]}")
         input_value = input("\n请输入下个问题（输入'quit'退出）> ")
@@ -217,6 +221,3 @@ def test_final_retriever():
         results = retriever.retrieve(input_value)
 
     print("=" * 10 + "用户选择退出" + "=" * 10)
-
-
-

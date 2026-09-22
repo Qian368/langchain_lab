@@ -4,6 +4,7 @@ import logging
 import warnings
 from functools import lru_cache
 
+from colorama import Fore, Style, init
 import questionary
 from jwt.warnings import InsecureKeyLengthWarning
 from langchain.chat_models import init_chat_model
@@ -13,6 +14,7 @@ from langchain_lab.core.config import LLMConfig, LLMInstanceConfig, load_llm_con
 
 warnings.filterwarnings("ignore", category=InsecureKeyLengthWarning)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+init(autoreset=True)
 
 
 class ModelNotFoundError(ValueError):
@@ -68,10 +70,11 @@ def get_llm(name: str | None = None):
     config = _get_config()
     available = config.available_instances()
 
-    print("当前可用实例:", list(available))
+    print(f"{Fore.BLUE}LLM 信息（不测试连通性，配置满足要求即可用）👇：")
+    print(f"当前可用实例👉：{Fore.GREEN}{list(available)}{Style.RESET_ALL} 详情👇：")
     # 打印某个实例的 api_key 是否为空
     for llm, cfg in available.items():
-        print(f"{llm}:  model={cfg.model}  api_key={'***' if cfg.api_key else 'EMPTY'},  base_url={cfg.base_url}")
+        print(f"{Fore.GREEN}{llm}:  model={cfg.model}  api_key={'***' if cfg.api_key else 'EMPTY'},  base_url={cfg.base_url}")
 
     # 1. 显示指定
     if name:

@@ -35,7 +35,7 @@ def run_tests() -> bool:
         printer.set_style(printer.style_name.SUCCESS)
         printer.stream_chunk("① 这段是 SUCCESS 样式（绿色加粗）\n")
         print("② 这段 print 应该也保持绿色加粗")
-        printer.reset_style()
+        printer.recover_style()
         print("③ 这段已恢复正常")
         all_ok &= check("_current_style 已清空", printer._current_style == "")
         all_ok &= check("_stdout_stack 已清空", len(printer._stdout_stack) == 0)
@@ -48,9 +48,9 @@ def run_tests() -> bool:
         printer.stream_chunk("① 外层蓝色\n")
         printer.set_style(printer.style_name.RED)
         printer.stream_chunk("② 内层红色（覆盖蓝色）\n")
-        printer.reset_style()
+        printer.recover_style()
         printer.stream_chunk("③ 应该恢复蓝色\n")
-        printer.reset_style()
+        printer.recover_style()
         printer.stream_chunk("④ 恢复默认\n")
         all_ok &= check("_current_style 已清空", printer._current_style == "")
         all_ok &= check("_stdout_stack 已清空", len(printer._stdout_stack) == 0)
@@ -86,7 +86,7 @@ def run_tests() -> bool:
         printer.set_style(printer.style_name.HIGHLIGHT)
         print("① 这段 print 应该是高亮色（亮黄色前景）")
         print("② 第二段 print 仍保持高亮")
-        printer.reset_style()
+        printer.recover_style()
         print("③ 恢复默认")
         all_ok &= check("_current_style 已清空", printer._current_style == "")
         all_ok &= check("_stdout_stack 已清空", len(printer._stdout_stack) == 0)
@@ -94,9 +94,9 @@ def run_tests() -> bool:
 
         # ---------- 测试 6：边界情况 ----------
         separator("测试 6：空状态调用 reset_style / 连续 reset")
-        printer.reset_style()  # 无样式时调用，不应报错
+        printer.recover_style()  # 无样式时调用，不应报错
         printer.stream_chunk("① 默认样式输出\n")
-        printer.reset_style()  # 连续第二次 reset
+        printer.recover_style()  # 连续第二次 reset
         printer.stream_chunk("② 再 reset 一次，也不应报错\n")
         check("无异常发生", True)
 
@@ -113,7 +113,7 @@ def run_tests() -> bool:
                 printer.set_style(printer.style_name.WARNING)
                 print("① 警告色（autoreset=True 下 print 仍保持样式）")
                 print("② 再次 print 仍是警告色")
-                printer.reset_style()
+                printer.recover_style()
                 print("③ 恢复默认")
             finally:
                 colorama.deinit()

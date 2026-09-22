@@ -1,10 +1,13 @@
 def temp():
+    import asyncio
+
     # print_attr()
     # print_test1()
     # print_test_2()
-    # print_test_3()
+    asyncio.run(test_printer())
     # dowmload_model()
     pass
+
 
 if __name__ == "__main__":
     temp()
@@ -41,15 +44,13 @@ def print_test_2():
     # print(sys.stdout.autoreset)  # 打印值
 
 
-def print_test_3():
+async def test_printer():
     from langchain_lab.util.prompt_style import Printer
 
     printer = Printer()
+    printer.begin("代发是你们dfsae打发哦您呢斯蒂芬妮那倒是fdsafs")
     printer.yellow(
-        "代发是你们dfsae打发哦您呢斯蒂芬妮那倒是fdsafsafsadf地方萨芬是的\n是的防守打法vv代发突然好个人v成本结合处理了前景色。背景色如果要亮色（100–107），需单独扩展映射，目前你的标签区背景色暂不\n支处理了前景色。背景色如果要亮色（100–107），需单独扩展映射，目前你的标签区背景色暂不支"
-    )
-    printer.yellow(
-        "代发是你们dfsae打发哦您呢斯蒂芬妮那倒是合同我让他和我通\n融通融好突然我忽然问哈让他处理了前景色。背景色如果要亮色（100–107），需单独扩展映射，目前你的标签区背景色暂不支处理了\n前景色。背景色如果要亮色（100–107），需单独扩展映射，目前你的标签区背景色暂不支",
+        "代发是你们dfsae打发哦您呢斯蒂芬妮那倒是合同我让他和我暂不支",
         bright=True,
     )
 
@@ -67,4 +68,3 @@ def dowmload_model():
     )
 
     print("done")
-
