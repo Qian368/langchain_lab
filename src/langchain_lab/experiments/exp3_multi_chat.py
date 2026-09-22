@@ -31,14 +31,18 @@ async def main():
     printer.begin("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
 
     try:
-        llm = get_llm()
+        llm = await asyncio.to_thread(get_llm)
         tools = get_tools()
         llm_with_tools = llm.bind_tools(tools=tools)
 
         # 第一轮：模型决定调用工具
         system_prompt = (
             await session.prompt_async(
-                printer.message("请输入你的系统提示词(shift + enter 换行)：\n> ", style_name=printer.style_name.MESSAGE),
+                printer.message(
+                    "（可回车跳过——内置默认系统提示词为：你是一个配合测试的助手，按照用户要求执行Agent循环任务）\n"
+                    "请输入你的系统提示词(shift + enter 换行)：\n> ",
+                    style_name=printer.style_name.MESSAGE,
+                ),
                 style=printer.style,
                 key_bindings=bindings,
                 multiline=True,
@@ -91,13 +95,13 @@ async def _single_chat_loop(
         injected_tool_limit_msg: SystemMessage | None = None
 
         # 到达llm轮次上限，准备注入临时提示
-        if llm_loop_count > MAX_LLM_LOOP:
+        if llm_loop_count >= MAX_LLM_LOOP:  # 先判断，再自增，用 >=
             injected_llm_limit_msg = SystemMessage(
                 content="本轮对话已到达最大Agent轮次上限，请基于现有全部信息直接给出最终答案，禁止调用任何工具。",
                 additional_kwargs={"meta": "llm_loop_break"},
             )
 
-        if tool_call_count > MAX_TOOL_CALLS:
+        if tool_call_count >= MAX_TOOL_CALLS:  # 先判断，再自增，用 >=
             injected_tool_limit_msg = SystemMessage(
                 content="本轮对话工具调用次数已耗尽，不再执行后续工具，请基于已获得的工具结果总结回答，禁止继续调用工具",
                 additional_kwargs={"meta": "tool_call_break"},
@@ -110,7 +114,7 @@ async def _single_chat_loop(
         if injected_tool_limit_msg is not None:
             current_messages.append(injected_tool_limit_msg)
 
-        llm_loop_count += 1  # 业务计数 + 1
+        llm_loop_count += 1  # 比工具多了一轮自增
         # 使用拷贝后的current_messages调用stream，原始messages不受临时标记影响！
         result = llm_with_tools.stream(current_messages)
 
@@ -152,7 +156,8 @@ async def _single_chat_loop(
         messages.append(full_chunk)
 
         # 最后答复后退出 while
-        if llm_loop_count > MAX_LLM_LOOP + 1 or tool_call_count > MAX_TOOL_CALLS:  # 因为LLM注入系统消息到这里多了一次计数
+        # LLM 的收尾轮会走多一次自增流程，计数溢出上限；工具的收尾直接无额外自增，计数顶格停在上限
+        if llm_loop_count > MAX_LLM_LOOP or tool_call_count >= MAX_TOOL_CALLS:  # 因为LLM注入系统消息到这里多了一次计数
             printer.error("=" * 35 + " 本次对话轮数或工具调用次数已耗尽~ " + "=" * 35)
             break
 
@@ -176,10 +181,10 @@ async def _single_chat_loop(
             print("下面开始执行工具：")
             for i, tc in enumerate(full_chunk.tool_calls, 1):
                 # 超限退出for循环，否则继续调用工具，统一外面负责注入 SystemMessage
-                if tool_call_count > MAX_TOOL_CALLS:
+                if tool_call_count >= MAX_TOOL_CALLS:  # 先判断，再自增，用 >=
                     break
-                tool_call_count += 1  # 业务计数 + 1
 
+                tool_call_count += 1  # 业务计数 + 1
                 # 查找是否有匹配的工具
                 target_tool = next((tool for tool in tools if tool.name == tc["name"]), None)
 

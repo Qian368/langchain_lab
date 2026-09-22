@@ -12,13 +12,32 @@
 """
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def find_project_root(start: Path) -> Path:
+    """优先用环境变量，否则向上搜索 pyproject.toml"""
+    env_root = os.getenv("PROJECT_ROOT")
+    if env_root:
+        return Path(env_root)
+
+    for parent in start.parents:
+        if (parent / "pyproject.toml").exists():
+            return parent
+    raise FileNotFoundError("找不到项目根目录")
+
+
 # 项目根目录下的 logs 文件夹
-LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+PROJECT_ROOT = find_project_root(Path(__file__).resolve())
+LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 日志格式：时间 | 级别 | 模块名 | 消息
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"

@@ -1,19 +1,20 @@
-import json
-
-from langchain_core.messages import SystemMessage
-
-
 def temp():
     # print_attr()
     # print_test1()
     # print_test_2()
     # print_test_3()
     # dowmload_model()
-    retriever_test()
     pass
+
+if __name__ == "__main__":
+    temp()
 
 
 def print_attr():
+    import json
+
+    from langchain_core.messages import SystemMessage
+
     attr_name = dir(SystemMessage)
     # filtered = [n for n in attr_name if not (n.startswith("__") and n.endswith("__"))]
     print(
@@ -67,32 +68,3 @@ def dowmload_model():
 
     print("done")
 
-
-def retriever_test():
-    from langchain_lab.rag.retriever import SimpleRetriever
-
-    # 模拟知识库（实际中这里应该是从文档加载并切分好的）
-    documents = [
-        "养老金申领需要达到法定退休年龄",
-        "申领时需要连续缴费满15年",
-        "社保转移可以通过当地人社局线上办理",
-        "医保报销需要保留原始发票和处方单",
-        "生育津贴需要在产后90天内申请",
-    ]
-
-    # 初始化检索器（这一步会向量化所有文档）
-    retriever = SimpleRetriever(documents, top_k=3)
-
-    # 测试检索
-    query = "我缴费多少年才能领养老金？"
-    print("===检索结果===")
-    result = retriever.retrieve(query)
-    if not result:
-        print("抱歉，知识库中暂无相关信息")
-    else:
-        for score, doc in result:
-            print(f"相似度分数：{score:.4f}；内容：{doc}")
-
-    # 测试拼装 Prompt
-    print("\n=== 生成的 Prompt ===")
-    print(retriever.build_prompt(query))

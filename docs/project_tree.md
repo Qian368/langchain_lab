@@ -1,14 +1,17 @@
 # 项目目录结构
 
-- 生成时间：`2026-09-16 08:55:54`
-- 项目根目录：`E:\个人资料\脚本程序\AI agent\Practice\langchain_lab`
+- 生成时间：`2026-09-21 10:48:16`
+- 项目根目录：`E:\project-dev\ai-agent\practice\langchain_lab`
 
 ```text
 langchain_lab/
+├── .vscode/
+│   └── settings.json
 ├── docs/
 │   ├── pint流式响应单chunk.tool_call_chunks示例 .jsonc
 │   ├── pint流式响应单chunk示例.jsonc
-│   └── pint流式响应最后6个chunk示例(观察变化).jsonc
+│   ├── pint流式响应最后6个chunk示例(观察变化).jsonc
+│   └── 向量化存储及返回索引流程.md
 ├── src/
 │   ├── langchain_lab/
 │   │   ├── core/
@@ -23,18 +26,33 @@ langchain_lab/
 │   │   │   ├── exp2_single_chat.py
 │   │   │   ├── exp3_multi_chat.py
 │   │   │   ├── exp4_prompt_template.py
-│   │   │   └── exp5_lcel_pipeline.py
+│   │   │   ├── exp5_lcel_pipeline.py
+│   │   │   ├── exp6_base_retrieve.py
+│   │   │   ├── exp7_rag_indexing.py
+│   │   │   └── exp8_rag_querying.py
+│   │   ├── rag/
+│   │   │   ├── __init__.py
+│   │   │   ├── embedding.py
+│   │   │   ├── loader.py
+│   │   │   ├── retriever.py
+│   │   │   ├── splitter.py
+│   │   │   └── vectorstore.py
 │   │   ├── scratch/
-│   │   │   └── temp_.py
+│   │   │   ├── temp.py
+│   │   │   └── temp_for_retriever.py
 │   │   ├── util/
 │   │   │   ├── __init__.py
+│   │   │   ├── get_path.py
+│   │   │   ├── logger.py
 │   │   │   ├── prompt_style.py
 │   │   │   └── test_printer.py
 │   │   ├── __init__.py
 │   │   └── main.py
 │   └── tests/
+│       └── test_retriever.py
 ├── .gitignore
 ├── .python-version
+├── gen_tree.py
 ├── pyproject.toml
 ├── README.md
 └── uv.lock

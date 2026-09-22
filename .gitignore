@@ -12,4 +12,6 @@ logs/
 # Virtual environments
 .venv
 
+# Custom
 .env
+kb_index/

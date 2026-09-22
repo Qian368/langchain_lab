@@ -17,6 +17,16 @@
         {
             "name": "tokenizers",
             "depth": 1
-        }
-    ]
+        },
+    ],
+    "python.analysis.exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.*",
+        ".venv",
+        "**/site-packages/sentence_transformers/**",
+        "**/site-packages/transformers/**",
+        "**/site-packages/tokenizers/**",
+        "**/site-packages/huggingface_hub/**",
+    ],
 }
