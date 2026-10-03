@@ -21,10 +21,15 @@ dependencies = [
     "langchain-deepseek>=1.1.0",
     "langchain-zhipuai>=0.0.1",
     "questionary>=2.1.1",
+    "pymongo>=4.18.2",
+    "chromadb>=1.5.9",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.54.0",
+    "python-multipart>=0.0.32",
 ]
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ruff>=0.16.8"]
+dev = ["pytest>=9.1.1", "ruff>=0.16.8", "scalar-fastapi>=1.9.1"]
 
 [project.optional-dependencies]
 zhipuai = ["langchain-zhipuai"]   # 或 ["langchain-community","zhipuai"]
@@ -34,6 +39,8 @@ ollama = ["langchain-ollama"]
 
 [project.scripts]
 main = "langchain_lab.main:main"
+serve_rag = "langchain_lab.rag.api.main_rag:serve"
+operation = "langchain_lab.rag.operation.entry:main"
 temp = "langchain_lab.scratch.temp:temp"
 temp1 = "langchain_lab.scratch.temp_for_retriever:temp"
 

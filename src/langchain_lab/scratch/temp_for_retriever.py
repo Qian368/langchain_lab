@@ -10,10 +10,6 @@ def temp():
     pass
 
 
-if __name__ == "__main__":
-    temp()
-
-
 def test_simple_retriever():
     from langchain_lab.rag.retriever import SimpleRetriever
 
@@ -221,3 +217,53 @@ def test_final_retriever():
         results = retriever.retrieve(input_value)
 
     print("=" * 10 + "用户选择退出" + "=" * 10)
+
+
+# ========== 脚本入口，路由执行 ==========
+# region
+import inspect
+import sys
+
+import questionary
+
+
+def main():
+    # 动态获取路由函数，也可以传 prefix="" 获取所有公开函数
+    routes = get_current_functions(prefix="test_")
+
+    if not routes:
+        print("未找到任何符合条件的函数")
+        return
+
+    # 使用 questionary 动态呈现函数名列表
+    choice = questionary.select("请选择要执行的路由函数：", choices=list(routes.keys())).ask()
+
+    if not choice:
+        return
+
+    # 确认执行
+    if questionary.confirm(f"确认执行 {choice} 吗？").ask():
+        routes[choice]()
+    else:
+        print("已取消")
+
+
+def get_current_functions(prefix="route_"):
+    """
+    获取当前模块中定义且名称符合指定前缀的函数。
+    prefix 为空字符串时，获取所有当前模块定义的非下划线开头函数。
+    """
+    current_module = sys.modules[__name__]
+    funcs = {}
+
+    for name, func in inspect.getmembers(current_module, inspect.isfunction):
+        # 只保留定义在当前模块内的函数，排除 import 进来的
+        if func.__module__ == __name__ and ((prefix and name.startswith(prefix)) or (not prefix and not name.startswith("_"))):
+            funcs[name] = func
+
+    return funcs
+
+
+if __name__ == "__main__":
+    main()
+# endregion

@@ -4,7 +4,7 @@ from langchain.messages import HumanMessage
 from langchain_core.language_models.base import LanguageModelInput
 from prompt_toolkit import prompt
 
-from langchain_lab.core.llm import get_llm
+from langchain_lab.core.llm.llm import get_llm
 
 
 def main():

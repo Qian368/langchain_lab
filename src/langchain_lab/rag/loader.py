@@ -4,16 +4,19 @@
 支持单个文件加载和目录批量加载。
 """
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from langchain_lab.util.logger import logger
+from langchain_lab.util.logger import LogName, setup_logger
+
+logger = setup_logger(LogName.RAG)
 
 
 @dataclass
 class RawDocument:
     """
-    ## 原生文件对象：真正的文件
+    ### 原生文件对象：真正的文件
     尚未切分的原始文档，包含文本和文件级元数据
     """
 
@@ -31,6 +34,14 @@ class FileLoader:
         self.SUPPORTED_EXTS = {".md", ".txt", ".markdown"}
         self.base_dir = Path(base_dir)
 
+    def _calc_file_sha256(self, file_path: Path) -> str:
+        """计算文件sha256哈希"""
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
     def load_file(self, file_path: str | Path) -> RawDocument:
         """加载单个文件，返回 RawDocument"""
         path = Path(file_path)
@@ -43,7 +54,10 @@ class FileLoader:
         with open(path, "r", encoding="utf-8") as f:  # noqa: UP015
             text = f.read()
 
+        content_hash = self._calc_file_sha256(path)
+
         metadata = {
+            "content_hash": content_hash,
             "source": path.name,  # 先用文件名保底
             "file_path": str(path.absolute()),
         }

@@ -7,8 +7,8 @@ from typing import cast
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from prompt_toolkit import prompt
 
-from langchain_lab.core.llm import ModelNotFoundError, get_llm, logging
-from langchain_lab.core.tools import get_tools
+from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm, logging
+from langchain_lab.core.tools.tools import get_tools
 
 
 async def main():

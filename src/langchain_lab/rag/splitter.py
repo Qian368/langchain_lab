@@ -12,7 +12,9 @@ from dataclasses import dataclass
 
 from langchain_lab.rag.loader import RawDocument
 from langchain_lab.rag.retriever import Document
-from langchain_lab.util.logger import logger
+from langchain_lab.util.logger import LogName, setup_logger
+
+logger = setup_logger(LogName.RAG)
 
 
 @dataclass
@@ -53,6 +55,7 @@ class TextSplitter:
     def split_raw_document(self, raw_doc: RawDocument) -> list[Document]:
         """
         入口：将 RawDocument 切分为 Document 列表
+
         自动继承 raw_doc.metadata 到每个 chunk 的 metadata
         """
         # 文件级元数据：source, file_path, modified...

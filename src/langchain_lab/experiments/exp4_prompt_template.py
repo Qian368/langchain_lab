@@ -2,7 +2,7 @@
 
 """提示词模版也是可以 invoke 的类型，模版列表留空，传入字典填空"""
 
-from langchain_lab.core.llm import get_llm
+from langchain_lab.core.llm.llm import get_llm
 from langchain_lab.core.messages import get_basic_prompt, get_multi_turn_prompt
 from langchain_lab.util.prompt_style import Printer
 

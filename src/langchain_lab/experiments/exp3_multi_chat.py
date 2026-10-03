@@ -11,8 +11,9 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from langchain_core.runnables.base import Runnable
 from prompt_toolkit import PromptSession
 
-from langchain_lab.core.llm import ModelNotFoundError, get_llm, logging
-from langchain_lab.core.tools import get_tools
+from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm, logging
+from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
+from langchain_lab.core.tools.tools import get_tools
 from langchain_lab.util.prompt_style import Printer, bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印
@@ -34,6 +35,13 @@ async def main():
         tools = get_tools()
         llm_with_tools = llm.bind_tools(tools=tools)
         printer.reset_all_state()
+
+        # ===== 外部传入：从thread会话获取的上下文【核心，不进messages】 =====
+        session_ctx = {
+            "user_id": "u_001",
+            "tenant_id": "t_001",
+            "trace_id": "tr_abc123",
+        }
 
         printer.begin("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
         # 第一轮：模型决定调用工具
@@ -72,7 +80,7 @@ async def main():
                 printer.warning("X" * 50 + " 用户选择终止 " + "X" * 50 + "\n\n")
                 break
             messages.append(HumanMessage(content=human_prompt))
-            messages = await _single_chat_loop(tools=tools, llm_with_tools=llm_with_tools, messages=messages)
+            messages = await _single_chat_loop(tools=tools, llm_with_tools=llm_with_tools, messages=messages, session_ctx=session_ctx)
             print("\n\n" + "=" * 38 + '\033[1;32m 继续聊天 or 输入"0" 退出 \033[0m' + "=" * 40)
 
     except ModelNotFoundError as e:
@@ -84,12 +92,12 @@ async def _single_chat_loop(
     tools: list[BaseTool],
     llm_with_tools: Runnable,
     messages: list[BaseMessage],
+    session_ctx: dict,
     llm: BaseChatModel | None = None,
 ) -> list[BaseMessage]:
     """单次对话循环完成任务"""
     tool_call_count = 0
     llm_loop_count = 0
-    tool_names = [tool.name for tool in tools]
     print(Fore.BLUE + "=" * 30 + "用户发起调用 llm " + "=" * 30)
     while True:
         injected_llm_limit_msg: SystemMessage | None = None
@@ -187,19 +195,35 @@ async def _single_chat_loop(
                     break
 
                 tool_call_count += 1  # 业务计数 + 1
-                # 查找是否有匹配的工具
-                target_tool = next((tool for tool in tools if tool.name == tc["name"]), None)
 
-                if target_tool is None:
-                    messages.append(
-                        ToolMessage(content=f"未发现工具：{tc['name']}，能用有效工具为:{tool_names}", tool_call_id=tc["id"], name=tc["name"])
-                    )
-                    print(f"📢向大哥报告：llm 调用了不存在的工具{[i]}：{tc['name']}")
-                else:
-                    print(f"执行工具{[i]}：{tc['name']}")
-                    tool_result = await target_tool.ainvoke(tc["args"])
-                    messages.append(ToolMessage(content=json.dumps(tool_result), tool_call_id=tc["id"], name=tc["name"]))
-                    print(f"       └─ 执行结果：{tool_result}")
+                # ✅ 一行调用，所有中间件全部内置
+                result = await execute_safe_tool_call(tool_call=tc, tools=tools, session_ctx=session_ctx, tool_index=i)
+
+                # 统一拼装 ToolMessage
+                messages.append(
+                    ToolMessage(content=json.dumps(result["content"], ensure_ascii=False), tool_call_id=result["tool_call_id"], name=result["name"])
+                )
+
+                # region 已迁移至 工具调用中间件
+                # # 查找是否有匹配的工具
+                # target_tool = next((tool for tool in tools if tool.name == tc["name"]), None)
+                # if target_tool is None:
+                #     messages.append(
+                #         ToolMessage(
+                #             content=f"未发现工具：{tc['name']}，能用有效工具为:{[t.name for t in tools]}",
+                #             tool_call_id=tc["id"],
+                #             name=tc["name"],
+                #         )
+                #     )
+                #     print(f"📢向大哥报告：llm 调用了不存在的工具{[i]}：{tc['name']}")
+                # else:
+                #     print(f"执行工具{[i]}：{tc['name']}")
+                #     tool_result = await target_tool.ainvoke(tc["args"])
+
+                #     messages.append(ToolMessage(content=json.dumps(tool_result), tool_call_id=tc["id"], name=tc["name"]))
+                #     print(f"       └─ 执行结果：{tool_result}")
+                # endregion
+
             # 有工具调用，回到循环，再次带工具调用 LLM
             print("-" * 25 + " 工具执行结束 " + "-" * 25)
             print()

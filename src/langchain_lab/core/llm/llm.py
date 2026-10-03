@@ -1,20 +1,22 @@
 """模型组件：初始化 LLM 实例"""
 
-import logging
 import warnings
 from functools import lru_cache
 
-from colorama import Fore, Style, init
 import questionary
+from colorama import Fore, Style, init
 from jwt.warnings import InsecureKeyLengthWarning
 from langchain.chat_models import init_chat_model
 
 from langchain_lab import __project_name__
-from langchain_lab.core.config import LLMConfig, LLMInstanceConfig, load_llm_config
+from langchain_lab.core.llm.llm_schema import LLMConfig, LLMInstanceConfig, load_llm_config
 
 warnings.filterwarnings("ignore", category=InsecureKeyLengthWarning)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 init(autoreset=True)
+
+from langchain_lab.util.logger import LogName, setup_logger
+
+logger = setup_logger(LogName.CORE)
 
 
 class ModelNotFoundError(ValueError):
@@ -89,7 +91,7 @@ def get_llm(name: str | None = None):
     # 3. 只有一个可用实例，自动使用
     if len(available) == 1:
         name = next(iter(available))
-        logging.info("使用唯一可用模型：%s", name)
+        logger.info("使用唯一可用模型：%s", name)
         return build_llm(available[name])
 
     # 多个可用且没有默认 → questionary 选择

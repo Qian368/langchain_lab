@@ -14,6 +14,7 @@
 import logging
 import os
 import sys
+from enum import StrEnum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -47,11 +48,26 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 MAX_BYTES = 1 * 1024 * 1024  # 单个文件最大 1MB
 BACKUP_COUNT = 3  # 保留 5 个备份文件
 
+PROJECT_NAME = "langchain_lab"
 
-def _setup_logger() -> logging.Logger:
+
+class LogName(StrEnum):
+    """项目内所有日志器的统一名称登记表"""
+
+    PROJECT = PROJECT_NAME
+    CORE = f"{PROJECT_NAME}.core"
+    RAG = f"{PROJECT_NAME}.rag"
+    UTIL = f"{PROJECT_NAME}.util"
+    EXPER = f"{PROJECT_NAME}.exp"
+    OPERATE = f"{PROJECT_NAME}.operate"
+
+
+def setup_logger(logger_name: LogName = LogName.PROJECT) -> logging.Logger:
     """配置并返回全局 logger 实例"""
-    logger = logging.getLogger("langchain_lab")
+    logger = logging.getLogger(logger_name)
     logger.setLevel(logging.DEBUG)
+
+    logger.propagate = False
 
     # 防止重复添加 handler（模块被多次导入时）
     if logger.handlers:
@@ -89,4 +105,4 @@ def _setup_logger() -> logging.Logger:
 
 
 # 模块级单例，整个项目共享同一个实例
-logger = _setup_logger()
+# logger = setup_logger()

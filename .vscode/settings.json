@@ -29,4 +29,10 @@
         "**/site-packages/tokenizers/**",
         "**/site-packages/huggingface_hub/**",
     ],
+    "mdb.presetConnections": [
+        {
+            "name": "Preset Connection",
+            "connectionString": "mongodb://localhost:27017"
+        }
+    ],
 }

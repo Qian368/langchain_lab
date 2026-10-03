@@ -9,7 +9,6 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from enum import StrEnum
-import threading
 from typing import ClassVar
 
 from prompt_toolkit import PromptSession

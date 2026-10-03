@@ -1,16 +1,22 @@
 def temp():
-    import asyncio
 
+    print_dict()
     # print_attr()
     # print_test1()
     # print_test_2()
-    asyncio.run(test_printer())
+    # asyncio.run(test_printer())
     # dowmload_model()
+
     pass
 
 
 if __name__ == "__main__":
     temp()
+
+
+def print_dict():
+    a = {}
+    print(bool(a))
 
 
 def print_attr():
