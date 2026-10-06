@@ -10,6 +10,12 @@ load_dotenv()
 PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", ".")).resolve()
 DATA_DIR = PROJECT_ROOT / "data"
 
+
+# =====开发配置=====
+
+session_ctx = {"user_id": "u_001", "tenant_id": "t_001", "trace_id": "tr_abc123", "is_tenant_admin": False}
+RAG_API_BASE = "http://127.0.0.1:8000"
+
 # =====用户侧配置=====
 # MongoDB
 MONGO_DB = "knowledge_base"

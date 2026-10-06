@@ -3,8 +3,12 @@
 import os
 from typing import Annotated
 
+import httpx
 from dotenv import load_dotenv
 from langchain_core.tools import InjectedToolArg, tool
+from pydantic import BaseModel, Field
+
+from langchain_lab.config import RAG_API_BASE
 
 # from langchain_core.runnables import RunnableConfig
 
@@ -16,8 +20,9 @@ def get_tools():
     return [
         add,
         multiply,
-        local_retriever,
+        # local_retriever,
         test1_query_order,
+        rag_knowledge_search,
     ]
 
 
@@ -39,7 +44,6 @@ def multiply(a: int, b: int):
 def test1_query_order(
     order_no: str,
     user_id: Annotated[str, InjectedToolArg],
-    tenant_id: Annotated[str, InjectedToolArg],
 ) -> str:
     """
     查询当前用户的订单详情
@@ -80,3 +84,42 @@ def local_retriever(query: str) -> str:
         print("未指定向量数据库目录，无法加载本地向量数据库，请在环境变量 .env 文件中添加向量数据库根地址")
         return "本地知识库出现异常，暂时无法使用"
     return retriever.build_json_content(query)
+
+
+# ---------------- 需要注入上下文的RAG工具 ----------------
+class RagSearchArgs(BaseModel):
+    question: str = Field(description="查询知识库的问题")
+    top_k: int = Field(description="返回片段数量")
+
+
+@tool(args_schema=RagSearchArgs)
+def rag_knowledge_search(
+    question: str,
+    tenant_id: Annotated[str, InjectedToolArg],
+    user_id: Annotated[str, InjectedToolArg],
+    is_tenant_admin: Annotated[str, InjectedToolArg],
+    top_k: int = 3,
+):
+    """查询内部知识库文档"""
+    payload = {"question": question, "top_k": top_k}
+    try:
+        with httpx.Client(timeout=20) as client:
+            resp = client.post(
+                f"{RAG_API_BASE}/query",
+                # 构造请求参数注入查询 api
+                params={
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                    "is_tenant_admin": is_tenant_admin,
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return f"知识库检索失败：{e!s}"
+
+    chunks = []
+    for item in data["results"]:
+        chunks.append(f"【文档来源：{item['source']}】\n{item['content']}")
+    return "\n\n".join(chunks)

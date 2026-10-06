@@ -1,6 +1,16 @@
 """FastAPI 的 Pydantic 模型定义"""
 
-from pydantic import BaseModel
+from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+class UserIdentity(BaseModel):
+    """用户身份载体，由API层解析后传入service"""
+
+    tenant_id: str
+    user_id: str
+    is_tenant_admin: bool = False
 
 
 class UploadResponse(BaseModel):
@@ -19,10 +29,29 @@ class ImportFolderResponse(BaseModel):
     message: str = "已提交批量导入，处理结束后可刷新文档列表查看"
 
 
+class DocumentItem(BaseModel):
+    """文档详情"""
+
+    id: str = Field(alias="_id", description="Mongo文档ID")
+    filename: str
+    content_hash: str
+    tenant_id: str
+    user_id: str
+    status: str
+    error_msg: str
+    chunk_count: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        extra = "allow"
+        populate_by_name = True  # Pydantic V2 用来支持既可以用别名 _id 赋值，也可以用属性名 id 赋值
+
+
 class DocumentListResponse(BaseModel):
     """文档列表响应"""
 
-    items: list[dict]
+    items: list[DocumentItem]
     total: int
 
 

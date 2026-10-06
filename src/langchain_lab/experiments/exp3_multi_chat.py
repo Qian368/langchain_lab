@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from typing import cast
 
 from colorama import Fore, init
@@ -11,7 +12,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from langchain_core.runnables.base import Runnable
 from prompt_toolkit import PromptSession
 
-from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm, logging
+from langchain_lab.config import session_ctx
+from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
 from langchain_lab.core.tools.tools import get_tools
 from langchain_lab.util.prompt_style import Printer, bindings
@@ -35,13 +37,6 @@ async def main():
         tools = get_tools()
         llm_with_tools = llm.bind_tools(tools=tools)
         printer.reset_all_state()
-
-        # ===== 外部传入：从thread会话获取的上下文【核心，不进messages】 =====
-        session_ctx = {
-            "user_id": "u_001",
-            "tenant_id": "t_001",
-            "trace_id": "tr_abc123",
-        }
 
         printer.begin("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
         # 第一轮：模型决定调用工具

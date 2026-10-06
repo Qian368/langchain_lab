@@ -43,17 +43,20 @@ async def execute_safe_tool_call(tool_call: ToolCall, tools: list[BaseTool], ses
     tool_call_id = tool_call["id"]
     raw_args = tool_call.get("args", {})
     trace_id = session_ctx.get("trace_id", "-")
-    user_id = session_ctx.get("user_id", "-")
 
     # ===== 中间件1：工具存在性校验 + 控制台打印 =====
     target_tool = next((t for t in tools if t.name == tool_name), None)
 
     if target_tool is None:
         err_msg = f"未发现工具：{tool_name}"
-        logger.warning(f"[trace:{trace_id}] 📢 工具 {[tool_index]} 不存在: {tool_name}, user:{user_id}")
+        logger.warning(f"[trace:{trace_id}] 📢 工具 {[tool_index]} 不存在: {tool_name}")
         return {"tool_call_id": tool_call_id, "name": tool_name, "content": f"{err_msg}，可用工具为：{[t.name for t in tools]}"}
 
-    logger.info(f"[trace:{trace_id}] 工具 {[tool_index]} 开始执行: {tool_name}, user:{user_id}, args:{json.dumps(raw_args, ensure_ascii=False)}")
+    logger.info(
+        f"[trace:{trace_id}] 工具 {[tool_index]} 开始执行: {tool_name}, "
+        f"\n       ├─ 动态按需注入参数：{json.dumps(session_ctx, ensure_ascii=False)}"
+        f"\n       └─ llm调用原参数：{json.dumps(raw_args, ensure_ascii=False)}"
+    )
 
     try:
         # ===== 中间件2：业务规则校验（可选，按需开启） =====

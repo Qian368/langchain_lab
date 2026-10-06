@@ -14,7 +14,6 @@ from pathlib import Path
 
 import faiss
 import numpy as np
-from collections.abc import Sequence
 
 from langchain_lab.rag.embedding import get_embedding_model
 from langchain_lab.util.logger import LogName, setup_logger
@@ -83,7 +82,7 @@ class Document:
     """
 
     text: str
-    id: str = field(default_factory=lambda: str(uuid.uuid4())).replace("-", "")  # 自动生成ID
+    id: str = field(default_factory=lambda: str(uuid.uuid4()).replace("-", ""))  # 自动生成ID
     metadata: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
