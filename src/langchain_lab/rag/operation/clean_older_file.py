@@ -1,7 +1,7 @@
 import time
 from pathlib import Path
 
-from langchain_lab.config import BACKUP_DIR, UPLOAD_DIR
+from langchain_lab.core.config._config import BACKUP_DIR, UPLOAD_DIR
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.OPERATE)

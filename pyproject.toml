@@ -26,10 +26,18 @@ dependencies = [
     "fastapi>=0.141.1",
     "uvicorn>=0.54.0",
     "python-multipart>=0.0.32",
+    "blinker>=1.9.0",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0.3",
 ]
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ruff>=0.16.8", "scalar-fastapi>=1.9.1"]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.8",
+    "scalar-fastapi>=1.9.1",
+]
 
 [project.optional-dependencies]
 zhipuai = ["langchain-zhipuai"]   # 或 ["langchain-community","zhipuai"]
@@ -55,7 +63,10 @@ testpaths = ["src/tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-# asyncio_mode = "auto"
+asyncio_mode = "auto"
+markers = """
+asyncio: asyncio test cases
+"""
 
 # addopts 数组；注意：这里的 -W 依旧无法抑制 import（收集阶段）抛出的警告
 # 如需屏蔽 langchain_community import警告：powershell设置环境变量

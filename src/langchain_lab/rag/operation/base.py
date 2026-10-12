@@ -12,7 +12,7 @@ from colorama import init
 from pymongo import MongoClient
 from pymongo.collection import Collection
 
-from langchain_lab.config import ADMIN_MONGO_URI, BACKUP_DIR, CHROMA_COLLECTION, CHROMA_PATH, META_DB_PATH, MONGO_COLLECTION, MONGO_DB
+from langchain_lab.core.config._config import ADMIN_MONGO_URI, BACKUP_DIR, CHROMA_COLLECTION, CHROMA_PATH, META_DB_PATH, MONGO_COLLECTION, MONGO_DB
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.OPERATE)

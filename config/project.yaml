@@ -1,0 +1,8 @@
+# 应用全局配置
+project:
+  root:
+    project_root: "."
+    data_dir: "./data"
+
+  backup:
+    backup_dir: "./data/backup"

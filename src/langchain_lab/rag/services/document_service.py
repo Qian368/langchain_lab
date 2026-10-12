@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from langchain_lab.config import ALLOWED_BASE_DIRS
+from langchain_lab.core.config._config import ALLOWED_BASE_DIRS
 from langchain_lab.rag.loader import FileLoader, RawDocument
 from langchain_lab.rag.splitter import TextSplitter
 from langchain_lab.rag.storage import MetaDB, MongoDocumentStore, VectorStore

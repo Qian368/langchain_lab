@@ -1,11 +1,12 @@
 def temp():
 
-    print_dict()
+    # print_dict()
     # print_attr()
     # print_test1()
     # print_test_2()
     # asyncio.run(test_printer())
     # dowmload_model()
+    test_config()
 
     pass
 
@@ -74,3 +75,12 @@ def dowmload_model():
     )
 
     print("done")
+
+
+def test_config():
+    from langchain_lab.core.config.config_core import get_config
+
+    # 两次获取是同一个实例
+    c1 = get_config()
+    c2 = get_config()
+    print(f"{c1 == c2}")

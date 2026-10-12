@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
 from pymongo.errors import DuplicateKeyError
 
-from langchain_lab.config import UPLOAD_DIR, session_ctx
+from langchain_lab.core.config.config_core import get_config
 from langchain_lab.rag.api.schemas import (
     DocumentItem,
     DocumentListResponse,
@@ -34,6 +34,10 @@ app = FastAPI(title="RAG Knowledge Base API", version="0.1.0")
 # 服务单例
 document_service = DocumentService()
 query_service = QueryService()
+
+config = get_config()
+UPLOAD_DIR = config.rag.file.upload_dir
+session_ctx = config.project.session_ctx
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SUPPORTED_EXTS = {".md", ".txt", ".markdown"}
@@ -113,7 +117,7 @@ async def import_folder(
     校验文件夹路径在 ALLOWED_BASE_DIRS 范围内。
     """
     folder_path = Path(folder)
-    from langchain_lab.config import ALLOWED_BASE_DIRS
+    from langchain_lab.core.config._config import ALLOWED_BASE_DIRS
 
     allowed = any(folder_path.resolve() == base.resolve() or folder_path.resolve().is_relative_to(base.resolve()) for base in ALLOWED_BASE_DIRS)
     if not allowed:

@@ -11,7 +11,7 @@ import chromadb
 from chromadb.api.models.Collection import Collection
 from chromadb.base_types import Metadata
 
-from langchain_lab.config import CHROMA_COLLECTION, CHROMA_PATH
+from langchain_lab.core.config._config import CHROMA_COLLECTION, CHROMA_PATH
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.RAG)

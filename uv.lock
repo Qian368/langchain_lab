@@ -215,6 +215,15 @@ wheels = [
 ]
 
 [[package]]
+name = "blinker"
+version = "1.9.0"
+source = { registry = "https://mirrors.sustech.edu.cn/pypi/web/simple" }
+sdist = { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/21/28/9b3f50ce0e048515135495f198351908d99540d69bfdc8c1d15b73dc55ce/blinker-1.9.0.tar.gz", hash = "sha256:b4ce2265a7abece45e7cc896e98dbebe6cead56bcf805a3d23136d145f5445bf" }
+wheels = [
+    { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl", hash = "sha256:ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc" },
+]
+
+[[package]]
 name = "build"
 version = "1.6.1"
 source = { registry = "https://mirrors.sustech.edu.cn/pypi/web/simple" }
@@ -1204,6 +1213,7 @@ name = "langchain-lab"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "blinker" },
     { name = "chromadb" },
     { name = "colorama" },
     { name = "faiss-cpu" },
@@ -1216,11 +1226,13 @@ dependencies = [
     { name = "langchain-zhipuai" },
     { name = "pathspec" },
     { name = "prompt-toolkit" },
+    { name = "pydantic-settings" },
     { name = "pyjwt" },
     { name = "pymongo" },
     { name = "pyqt6" },
     { name = "python-dotenv" },
     { name = "python-multipart" },
+    { name = "pyyaml" },
     { name = "questionary" },
     { name = "sentence-transformers" },
     { name = "uvicorn" },
@@ -1243,12 +1255,14 @@ zhipuai = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "pytest-asyncio" },
     { name = "ruff" },
     { name = "scalar-fastapi" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "blinker", specifier = ">=1.9.0" },
     { name = "chromadb", specifier = ">=1.5.9" },
     { name = "colorama", specifier = ">=0.4.6" },
     { name = "faiss-cpu", specifier = ">=1.15.1" },
@@ -1265,11 +1279,13 @@ requires-dist = [
     { name = "langchain-zhipuai", marker = "extra == 'zhipuai'" },
     { name = "pathspec", specifier = ">=1.1" },
     { name = "prompt-toolkit", specifier = ">=3.0.53" },
+    { name = "pydantic-settings", specifier = ">=2.15.0" },
     { name = "pyjwt", specifier = ">=2.13.0" },
     { name = "pymongo", specifier = ">=4.18.2" },
     { name = "pyqt6", specifier = ">=6.11.0" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "python-multipart", specifier = ">=0.0.32" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "questionary", specifier = ">=2.1.1" },
     { name = "sentence-transformers", specifier = ">=6.0.1" },
     { name = "uvicorn", specifier = ">=0.54.0" },
@@ -1279,6 +1295,7 @@ provides-extras = ["zhipuai", "deepseek", "openai", "ollama"]
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "ruff", specifier = ">=0.16.8" },
     { name = "scalar-fastapi", specifier = ">=1.9.1" },
 ]
@@ -2696,6 +2713,18 @@ dependencies = [
 sdist = { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313" }
 wheels = [
     { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c" },
+]
+
+[[package]]
+name = "pytest-asyncio"
+version = "1.4.0"
+source = { registry = "https://mirrors.sustech.edu.cn/pypi/web/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/43/7c/d36d04db312ecf4298932ef77e6e4a9e8ad017906e24e34f0b0c361a2473/pytest_asyncio-1.4.0.tar.gz", hash = "sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42" }
+wheels = [
+    { url = "https://mirrors.sustech.edu.cn/pypi/web/packages/03/e2/08a497ef684b88559c9cc5f4ad53a37e7b99e727094a86d6ea32536d5d3c/pytest_asyncio-1.4.0-py3-none-any.whl", hash = "sha256:933ca923a23075a87fb7070c0ec272a6848489824d887c85c812670932835aa1" },
 ]
 
 [[package]]

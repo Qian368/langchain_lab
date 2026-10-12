@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from langchain_lab.config import META_DB_PATH
+from langchain_lab.core.config._config import META_DB_PATH
 
 
 class MetaDB:

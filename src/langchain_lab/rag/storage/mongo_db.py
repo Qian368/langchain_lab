@@ -10,7 +10,7 @@ from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.collection import Collection
 
-from langchain_lab.config import MONGO_COLLECTION, MONGO_DB, USER_MONGO_URI
+from langchain_lab.core.config._config import MONGO_COLLECTION, MONGO_DB, USER_MONGO_URI
 
 
 class MongoDocumentStore:

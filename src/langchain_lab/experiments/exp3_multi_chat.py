@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from langchain_core.runnables.base import Runnable
 from prompt_toolkit import PromptSession
 
-from langchain_lab.config import session_ctx
+from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
 from langchain_lab.core.tools.tools import get_tools
@@ -27,6 +27,8 @@ printer = Printer()
 
 MAX_LLM_LOOP = 3
 MAX_TOOL_CALLS = 4
+
+session_ctx = get_config().project.session_ctx
 
 
 async def main():

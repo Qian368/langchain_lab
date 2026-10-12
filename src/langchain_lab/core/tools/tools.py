@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import InjectedToolArg, tool
 from pydantic import BaseModel, Field
 
-from langchain_lab.config import RAG_API_BASE
+from langchain_lab.core.config._config import RAG_API_BASE
 
 # from langchain_core.runnables import RunnableConfig
 
@@ -93,7 +93,7 @@ class RagSearchArgs(BaseModel):
 
 
 @tool(args_schema=RagSearchArgs)
-def rag_knowledge_search(
+async def rag_knowledge_search(
     question: str,
     tenant_id: Annotated[str, InjectedToolArg],
     user_id: Annotated[str, InjectedToolArg],
@@ -103,8 +103,10 @@ def rag_knowledge_search(
     """查询内部知识库文档"""
     payload = {"question": question, "top_k": top_k}
     try:
-        with httpx.Client(timeout=20) as client:
-            resp = client.post(
+        # with httpx.Client(timeout=20) as client:
+        # 异步版客户端
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
                 f"{RAG_API_BASE}/query",
                 # 构造请求参数注入查询 api
                 params={
