@@ -5,25 +5,45 @@ from typing import Annotated
 
 import httpx
 from dotenv import load_dotenv
-from langchain_core.tools import InjectedToolArg, tool
+from langchain_core.tools import BaseTool, InjectedToolArg, tool
 from pydantic import BaseModel, Field
 
 from langchain_lab.core.config._config import RAG_API_BASE
+from langchain_lab.mcp.mcp_session_manager import discover_mcp_tools
+from langchain_lab.mcp.mcp_tool_registry import _mcp_tool_registry
 
 # from langchain_core.runnables import RunnableConfig
 
 load_dotenv()
 
 
-def get_tools():
-    """返回工具列表"""
-    return [
+# ========== 全局缓存：启动时预加载 ==========
+# _mcp_tools_cache: list[BaseTool] = []
+
+
+async def get_full_tools(session_ctx: dict) -> list[BaseTool]:
+    """获取当前身份的完整工具集：基础工具 + 有权限的 MCP 工具"""
+    base_tools = get_base_tools()
+    mcp_tools = await _mcp_tool_registry.get_tools_for_identity(session_ctx)
+    return base_tools + mcp_tools
+
+
+async def preload_all_tools() -> list[BaseTool]:
+    """服务启动时调用一次，预加载所有 MCP 工具到缓存"""
+    base_tools = get_base_tools()
+    _mcp_tools_cache = await discover_mcp_tools("rag")
+    return base_tools + _mcp_tools_cache
+
+def get_base_tools():
+    """同步方法返回工具列表，完全兼容原有签名"""
+    base_tools = [
         add,
         multiply,
         # local_retriever,
-        test1_query_order,
-        rag_knowledge_search,
+        # test1_query_order,
+        # rag_knowledge_search,
     ]
+    return base_tools
 
 
 @tool

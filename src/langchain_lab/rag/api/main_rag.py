@@ -81,7 +81,7 @@ async def upload_document(
         if suffix not in SUPPORTED_EXTS:
             raise HTTPException(status_code=400, detail=f"不支持的文件类型: {suffix}")
 
-        temp_path = UPLOAD_DIR / f"{filename}"
+        temp_path = UPLOAD_DIR / Path(filename)
         with open(temp_path, "wb") as f:
             f.write(await file.read())
             f.flush()

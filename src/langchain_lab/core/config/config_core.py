@@ -7,8 +7,8 @@ import threading
 
 from langchain_lab.core.config.app_config import AppConfig
 from langchain_lab.core.config.evented_model import EventedModel
-from langchain_lab.core.config.loader import load_config
 from langchain_lab.core.config.ident_config import IdentConfig
+from langchain_lab.core.config.loader import load_config
 
 # 全局单例
 _CONFIG: AppConfig | None = None

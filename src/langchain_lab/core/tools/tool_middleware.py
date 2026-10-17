@@ -1,8 +1,10 @@
 import json
 import traceback
 
+import httpx
 from langchain.tools import BaseTool
 from langchain_core.messages import ToolCall
+from mcp import MCPError
 from pydantic import ValidationError
 
 # ========== 项目的 logger 替换这里 ==========
@@ -76,8 +78,16 @@ async def execute_safe_tool_call(tool_call: ToolCall, tools: list[BaseTool], ses
 
         # ===== 中间件3：上下文注入 + 执行工具 =====
         # 推荐：对应 InjectedToolArg：隐式工具参数拆分进工具入参，工具内部无需直接使用
-        merged_args = {**raw_args, **session_ctx}
-        tool_result = await target_tool.ainvoke(merged_args)
+        if getattr(target_tool, "_tool_type", None) == "mcp":
+            # MCP 工具：session_ctx 内部注入，不混入业务参数
+            tool_result = await target_tool.ainvoke(
+                raw_args,
+                session_ctx=session_ctx,
+            )
+        else:
+            # 本地工具：参数合并注入
+            merged_args = {**raw_args, **session_ctx}
+            tool_result = await target_tool.ainvoke(merged_args)
 
         # 对应 RunnableConfig 隐式工具参数：通过 configurable 注入，工具内部需手动拆分
         # tool_result = await target_tool.ainvoke(raw_args, config={"configurable": session_ctx})
@@ -95,13 +105,21 @@ async def execute_safe_tool_call(tool_call: ToolCall, tools: list[BaseTool], ses
         err_msg = f"参数错误：{'; '.join(errors)}，请修正后重试"
         logger.warning(f"[trace:{trace_id}] 工具 {[tool_index]} 参数校验失败: {tool_name}, {err_msg}")
         return {"tool_call_id": tool_call_id, "name": tool_name, "content": err_msg}
-
     except ToolExecutionError as e:
         # 业务规则错误：直接返回提示
         err_msg = str(e)
         logger.warning(f"[trace:{trace_id}] 工具 {[tool_index]} 业务校验失败: {tool_name}, {err_msg}")
         return {"tool_call_id": tool_call_id, "name": tool_name, "content": f"工具调用失败：{err_msg}"}
-
+    except MCPError as e:
+        # MCP 协议层错误：服务端返回错误、SSE流异常、响应超时等
+        err_msg = f"MCP 工具调用失败：{e.message}"
+        logger.warning(f"[trace:{trace_id}] 工具 {[tool_index]} MCP协议错误: {tool_name}, {err_msg}")
+        return {"tool_call_id": tool_call_id, "name": tool_name, "content": err_msg}
+    except httpx.ConnectError as e:
+        # 传输层错误：MCP服务不可达、连接断开
+        err_msg = "MCP 服务连接失败，无法调用工具"
+        logger.warning(f"[trace:{trace_id}] 工具 {[tool_index]} 连接失败: {tool_name}, {e!s}")
+        return {"tool_call_id": tool_call_id, "name": tool_name, "content": err_msg}
     except Exception as e:
         # 未知异常：不暴露内部细节，只返回通用错误
         logger.error(f"[trace:{trace_id}] 工具 {[tool_index]} 执行异常: {tool_name}, 错误:{e!s}\n{traceback.format_exc()}")

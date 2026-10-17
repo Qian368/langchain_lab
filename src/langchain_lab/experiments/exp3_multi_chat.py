@@ -15,7 +15,7 @@ from prompt_toolkit import PromptSession
 from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
-from langchain_lab.core.tools.tools import get_tools
+from langchain_lab.core.tools.tools import get_full_tools, preload_all_tools
 from langchain_lab.util.prompt_style import Printer, bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印
@@ -36,7 +36,9 @@ async def main():
 
     try:
         llm = await asyncio.to_thread(get_llm)
-        tools = get_tools()
+        # tools = await preload_all_tools()
+        tools = await get_full_tools(session_ctx)
+        print(f"当前可用工具集有：{[tool.name for tool in tools]}")
         llm_with_tools = llm.bind_tools(tools=tools)
         printer.reset_all_state()
 

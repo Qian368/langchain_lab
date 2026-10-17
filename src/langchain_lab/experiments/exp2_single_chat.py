@@ -7,8 +7,11 @@ from typing import cast
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from prompt_toolkit import prompt
 
-from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm, logging
-from langchain_lab.core.tools.tools import get_tools
+from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
+from langchain_lab.core.tools.tools import get_base_tools
+from langchain_lab.util.logger import LogName, setup_logger
+
+logger = setup_logger(LogName.EXPER)
 
 
 async def main():
@@ -21,7 +24,7 @@ async def main():
 
     try:
         llm = get_llm()
-        tools = get_tools()
+        tools = get_base_tools()
         llm_with_tools = llm.bind_tools(tools=tools)
 
         # 第一轮：模型决定调用工具
@@ -143,7 +146,7 @@ async def main():
                 break
 
     except ModelNotFoundError as e:
-        logging.warning(f"模型选择错误：{e}")
+        logger.warning(f"模型选择错误：{e}")
         raise
 
 

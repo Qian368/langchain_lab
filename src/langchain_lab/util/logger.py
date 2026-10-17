@@ -60,6 +60,7 @@ class LogName(StrEnum):
     UTIL = f"{PROJECT_NAME}.util"
     EXPER = f"{PROJECT_NAME}.exp"
     OPERATE = f"{PROJECT_NAME}.operate"
+    MCP = f"{PROJECT_NAME}.mcp"
 
 
 def setup_logger(logger_name: LogName = LogName.PROJECT) -> logging.Logger:

@@ -1,92 +1,3 @@
-"""
-
-EventedModel: 带字段变更事件的 Pydantic 基础模型
-=============================================
-
-基于 Pydantic V2 BaseModel 扩展，为模型字段提供「赋值自动触发变更事件」能力。
-支持字段级订阅/取消订阅，线程安全，兼容嵌套子模型更新。
-核心定位：配置类、状态类模型的变更通知与响应。
-
----
-### 核心特性
-- **自动事件触发**：对模型字段的任何合法赋值，自动发射变更事件，携带旧值与新值
-- **字段级订阅**：支持单个字段订阅、全字段订阅、一次性订阅，回调签名统一
-- **线程安全**：内置可重入锁，赋值、校验、事件发射全程原子化
-- **嵌套支持**：支持嵌套子模型的字典合并更新，自动触发父级字段事件
-- **初始化静默**：实例创建阶段的字段赋值不触发事件，仅后续修改触发
-- **子类隔离**：每个子类拥有独立的信号空间，互不污染
-
----
-### 基础使用
-
-#### 1. 定义模型
-```python
-class AppConfig(EventedModel):
-    name: str = "default"
-    port: int = Field(default=8080, ge=1, le=65535)
-    debug: bool = False
-```
-
-#### 2. 订阅事件
-```python
-config = AppConfig()
-
-# 订阅单个字段，回调签名：(sender, old_val, new_val)
-def on_port_change(sender, old_val, new_val):
-    print(f"端口变更: {old_val} -> {new_val}")
-
-config.subscribe("port", on_port_change)
-
-# 订阅所有字段，回调签名：(sender, field_name, old_val, new_val)
-def on_any_change(sender, field, old_val, new_val):
-    print(f"字段 {field} 变更: {old_val} -> {new_val}")
-
-config.subscribe_all(on_any_change)
-```
-
-#### 3. 修改字段（两种方式等价，均触发事件）
-```python
-# 方式1：直接属性赋值（推荐，直观）
-config.port = 9090
-
-# 方式2：update_and_emit 方法（适合嵌套模型局部更新 / 外部接口调用）
-config.update_and_emit("port", 9090)
-```
-
-#### 4. 批量原子更新
-```python
-config.batch_update_and_emit({
-    "port": 9090,
-    "debug": True
-})
-```
-
----
-### 重要说明
-1. **触发范围**：只有 Pydantic 模型字段（带类型注解声明的属性）才会触发事件；
-   方法、运行时动态新增属性、非模型类变量均不触发。
-2. **初始化静默**：`__init__` 阶段的字段赋值不触发事件，实例创建完成后的修改才触发。
-3. **嵌套更新**：子模型字段通过字典更新时，会强制走完整初始化校验，确保 `ge/le` 等约束生效。
-4. **信号隔离**：不同子类的信号字典相互独立，同字段名不会互相干扰。
-5. **校验保留**：完整保留 Pydantic 原生字段校验能力，赋值越界抛出 `ValidationError`。
-
----
-### API 速览
-| 方法 | 说明 |
-|---|---|
-| `subscribe(field, callback)` | 订阅指定字段变更事件 |
-| `unsubscribe(field, callback)` | 取消指定字段订阅 |
-| `subscribe_once(field, callback)` | 一次性订阅，触发一次后自动解绑 |
-| `subscribe_all(callback)` | 订阅所有字段变更事件 |
-| `unsubscribe_all(callback)` | 取消全字段订阅 |
-| `update_and_emit(field, value)` | 更新字段并触发事件（支持嵌套模型字典更新） |
-| `batch_update_and_emit(updates)` | 批量原子更新多个字段 |
-| `emit_event(field, old, new)` | 手动发射事件（不修改字段值） |
-
-依赖：Pydantic V2、blinker
-
-"""
-
 from __future__ import annotations
 
 import contextlib
@@ -105,6 +16,9 @@ class EventedModel(BaseModel):
 
     # 类级信号字典：每个子类独立拥有，惰性填充
     _signals: ClassVar[dict[str, NamedSignal]]
+
+    # 内部虚拟字段：实例整体变更事件标识
+    _INSTANCE_EVENT = "__instance__"
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -135,11 +49,6 @@ class EventedModel(BaseModel):
             # 新旧值相等，直接跳过赋值和信号触发
             if old == value:
                 return
-
-            # ===== 手动触发Pydantic字段赋值校验 =====（经测试，不需要手动触发）
-            # 强制走完整的字段验证逻辑，包含ge/le/类型等所有约束
-            # self.__pydantic_validator__.validate_assignment(self, name, value)
-
             super().__setattr__(name, value)  # Pydantic 校验并赋值
             self._publish_sync(name, old, value)
 
@@ -147,7 +56,8 @@ class EventedModel(BaseModel):
     def _get_signal(self, field: str) -> NamedSignal:
         """惰性获取字段信号，不存在则创建；字段非法抛 KeyError"""
         cls = type(self)
-        if field not in cls.model_fields:
+        # 内部虚拟字段（实例级事件）跳过模型字段校验
+        if field != self._INSTANCE_EVENT and field not in cls.model_fields:
             raise KeyError(f"未知配置项: {field}")
         if field not in cls._signals:
             cls._signals[field] = signal(f"config:{cls.__name__}:{field}")
@@ -170,11 +80,6 @@ class EventedModel(BaseModel):
         手动同步发射字段变更事件。
         ⚠️ 只广播事件！不会修改模型字段，不执行 Pydantic 校验。
         绝大多数业务场景不要使用，优先使用 update_and_emit()。
-        适用场景：数据已经在外部变更完成，仅需要补发事件通知。
-
-        :param field: 字段名
-        :param old: 旧值
-        :param new: 新值
         """
         self._publish_sync(field, old, new)
 
@@ -183,27 +88,21 @@ class EventedModel(BaseModel):
         手动异步发射字段变更事件（会 await 所有协程回调）。
         ⚠️ 只广播事件！不会修改模型字段，不执行 Pydantic 校验。
         绝大多数业务场景不要使用，优先使用 update_and_emit()。
-
-        :param field: 字段名
-        :param old: 旧值
-        :param new: 新值
         """
         await self._publish_async(field, old, new)
 
     # ---------- 主业务API：更新并发射事件 ----------
     def update_and_emit(self, field: str, changes: Any = None, **kw_changes):
         """更新配置，修改完成后自动发射变更事件。
-
         用法：
-            config.update_and_emit("enable_tools", False)            # 普通字段：位置传新值
-            config.update_and_emit("llm", {"temperature": 0.2})      # 子模型：位置传更新字典
-            config.update_and_emit("llm", temperature=0.2)            # 子模型：关键字传子字段
-            config.update_and_emit("system_prompt", "新提示词")       # 普通字段：位置传新值
+            config.update_and_emit("enable_tools", False)          # 普通字段：位置传新值
+            config.update_and_emit("llm", {"temperature": 0.2})    # 子模型：位置传更新字典
+            config.update_and_emit("llm", temperature=0.2)         # 子模型：关键字传子字段
+            config.update_and_emit("system_prompt", "新提示词")     # 普通字段：位置传新值
         注意：普通字段仅支持位置参数传新值，关键字参数仅对子模型生效。
         """
         # 字段合法性校验
         self._get_signal(field)
-
         current = getattr(self, field)
 
         # 子模型字段：支持字典合并更新，或直接替换整个模型
@@ -237,10 +136,10 @@ class EventedModel(BaseModel):
 
     def batch_update_and_emit(self, updates: dict[str, Any]) -> None:
         """
-        批量原子更新多个字段（线程安全），全部字段在同一锁内执行，依次发射事件。
+        批量原子更新多个字段（线程安全），全部字段在同一锁内执行，依次发射字段事件，
+        全部更新完成后额外发射一次【实例整体变更事件】。
         :param updates: 字段名->更新值的字典，子模型字段支持传嵌套字典。
         示例：
-
             config.batch_update_and_emit({
                 "enable_tools": False,
                 "llm": {"temperature": 0.2},
@@ -248,17 +147,21 @@ class EventedModel(BaseModel):
             })
         """
         with self._lock:
+            # 批量更新前完整快照
+            old_snapshot = self.model_dump()
             for field, value in updates.items():
                 if isinstance(value, dict):
                     self.update_and_emit(field, value)
                 else:
                     self.update_and_emit(field, value)
+            # 批量更新完成，发射实例整体变更事件
+            new_snapshot = self.model_dump()
+            self._publish_sync(self._INSTANCE_EVENT, old_snapshot, new_snapshot)
 
     # ================== 发布订阅封装 ==================
     def subscribe(self, field: str, callback: Callable[[Any, Any, Any], None]) -> None:
         """
         订阅单个字段变更事件。
-
         :param field: 字段名
         :param callback: 回调函数 callback(sender, old, new)
         """
@@ -273,7 +176,6 @@ class EventedModel(BaseModel):
     def subscribe_once(self, field: str, callback: Callable[[Any, Any, Any], None]) -> None:
         """
         一次性订阅单个字段变更，触发一次后自动解绑。
-
         :param field: 字段名
         :param callback: 回调函数 callback(sender, old, new)
         """
@@ -312,6 +214,23 @@ class EventedModel(BaseModel):
             self.unsubscribe(field_name, wrapper)
         with contextlib.suppress(AttributeError):
             delattr(self, f"_wrap_all_{id(callback)}")
+
+    # ========== 新增：实例级整体变更订阅 ==========
+    def subscribe_instance(self, callback: Callable[[Any, Any, Any], None]) -> None:
+        """
+        订阅【实例整体变更事件】，仅在 batch_update_and_emit 批量更新完成后触发一次。
+        回调签名：callback(sender, old_snapshot, new_snapshot)
+        - old_snapshot / new_snapshot 为批量更新前后的完整模型字典快照
+        ⚠️ 单个字段直接赋值 / update_and_emit 不会触发此事件，仅批量更新触发。
+        适用场景：配置整体变更后统一刷新缓存、重建上下文、重载资源等。
+        """
+        sig = self._get_signal(self._INSTANCE_EVENT)
+        sig.connect(callback, sender=self)
+
+    def unsubscribe_instance(self, callback: Callable[[Any, Any, Any], None]) -> None:
+        """取消实例整体变更事件订阅"""
+        sig = self._get_signal(self._INSTANCE_EVENT)
+        sig.disconnect(callback, sender=self)
 
     def subscribe_async(self, field: str, callback: Callable[[Any, Any, Any], Any]) -> None:
         """

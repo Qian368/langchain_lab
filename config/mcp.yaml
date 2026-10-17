@@ -1,0 +1,40 @@
+mcp:
+  ctx_template:
+    tenant_id: "t_001"
+    user_id: "u_001"
+    is_tenant_admin: false
+    extra: {}
+
+  # MCP 服务定义（全局唯一）
+  servers:
+    # 公共服务：所有租户默认可见
+    - mcp_id: "rag"
+      url: "http://127.0.0.1:8000/mcp"
+      scope: "public"
+
+    - mcp_id: "demo"
+      url: "http://127.0.0.1:8001/mcp"
+      scope: "public"
+
+    # 租户级服务：必须有授权条目才能访问
+    - mcp_id: "internal_crm"
+      url: "http://127.0.0.1:8002/mcp"
+      scope: "tenant"
+
+    - mcp_id: "finance_system"
+      url: "http://127.0.0.1:8003/mcp"
+      scope: "tenant"
+
+  # 租户授权（仅 tenant 级服务需要）
+  grants:
+    # t_001 租户可以访问内部 CRM
+    - mcp_id: "internal_crm"
+      tenant_id: "t_001"
+
+    # t_001 租户可以访问财务系统
+    - mcp_id: "finance_system"
+      tenant_id: "t_001"
+
+    # t_002 租户只能访问 CRM，不能访问财务
+    - mcp_id: "internal_crm"
+      tenant_id: "t_002"

@@ -28,6 +28,6 @@ class ProjectBackupSettings(EventedModel):
 class ProjectSettings(EventedModel):
     """应用全局配置"""
 
-    project: ProjectRootSettings = Field(default_factory=ProjectRootSettings)
+    root: ProjectRootSettings = Field(default_factory=ProjectRootSettings)
     backup: ProjectBackupSettings = Field(default_factory=ProjectBackupSettings)
     session_ctx: dict = Field(default_factory=lambda: {"user_id": "u_001", "tenant_id": "t_001", "trace_id": "tr_abc123", "is_tenant_admin": False})
