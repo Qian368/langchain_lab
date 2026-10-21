@@ -3,7 +3,7 @@ from typing import Any
 
 from langchain_core.tools import BaseTool
 
-from langchain_lab.mcp.mcp_session_manager import MCPSessionManager, _make_mcp_tool, _session_mgr
+from langchain_lab.mcp.client_encapsulation.mcp_session_manager import MCPSessionManager, _make_mcp_tool, _session_mgr
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.MCP)
@@ -114,6 +114,7 @@ class MCPToolRegistry:
                 all_mcp_tools.extend(tools)
                 logger.debug(f"成功加载 MCP: {mcp_id} 的工具")
             except Exception as e:
+                # 兜住 CancelledError（BaseException 子类）：单个 MCP 连接失败/超时只跳过，不拖垮整体
                 logger.warning(f"加载 MCP {mcp_id} 工具失败：{e!s}")
                 continue
 

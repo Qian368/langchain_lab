@@ -73,10 +73,10 @@ async def load_mcp_tools(session: ClientSession) -> list[BaseTool]:
     return tools
 
 
-# ========== 通用会话管理器 ==========
+# ========== 通用会话类 ==========
 class MCPStreamableSession:
     """
-    Streamable HTTP 会话管理器（通用元数据版）
+    Streamable HTTP 会话管理类（通用元数据版）
     - 支持任意上下文元数据透传，不限制字段
     - 对齐服务端 override / extra 双语义
     - 保留 set_identity 便捷方法，兼容现有调用
@@ -162,12 +162,16 @@ class MCPStreamableSession:
 
         http_client = httpx2.AsyncClient(headers=headers)
         self._stream_ctx = streamable_http_client(self.server_url, http_client=http_client)
-        read_stream, write_stream = await self._stream_ctx.__aenter__()
+        try:
+            read_stream, write_stream = await self._stream_ctx.__aenter__()
+            self._session_ctx = ClientSession(read_stream, write_stream)
+            session = await self._session_ctx.__aenter__()
 
-        self._session_ctx = ClientSession(read_stream, write_stream)
-        session = await self._session_ctx.__aenter__()
-        await session.initialize()
-        self._session = session
+            await session.initialize()
+            self._session = session
+        except (asyncio.CancelledError, Exception) as e:
+            await self.close()
+            raise RuntimeError(f"MCP 会话连接失败，会话已关闭底层异常： {e!s}") from e
 
     async def __aenter__(self):
         return self

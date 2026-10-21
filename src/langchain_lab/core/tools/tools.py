@@ -9,8 +9,8 @@ from langchain_core.tools import BaseTool, InjectedToolArg, tool
 from pydantic import BaseModel, Field
 
 from langchain_lab.core.config._config import RAG_API_BASE
-from langchain_lab.mcp.mcp_session_manager import discover_mcp_tools
-from langchain_lab.mcp.mcp_tool_registry import _mcp_tool_registry
+from langchain_lab.mcp.client_encapsulation.mcp_session_manager import discover_mcp_tools
+from langchain_lab.mcp.client_encapsulation.mcp_tool_registry import _mcp_tool_registry
 
 # from langchain_core.runnables import RunnableConfig
 
@@ -33,6 +33,7 @@ async def preload_all_tools() -> list[BaseTool]:
     base_tools = get_base_tools()
     _mcp_tools_cache = await discover_mcp_tools("rag")
     return base_tools + _mcp_tools_cache
+
 
 def get_base_tools():
     """同步方法返回工具列表，完全兼容原有签名"""

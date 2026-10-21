@@ -15,7 +15,7 @@ from prompt_toolkit import PromptSession
 from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
-from langchain_lab.core.tools.tools import get_full_tools, preload_all_tools
+from langchain_lab.core.tools.tools import get_full_tools
 from langchain_lab.util.prompt_style import Printer, bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印

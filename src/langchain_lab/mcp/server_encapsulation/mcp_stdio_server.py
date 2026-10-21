@@ -1,8 +1,8 @@
 # mcp_stdio_server.py
 import asyncio
 
-from langchain_lab.mcp.context_inject import bind_exec_context, setup_exec_context
 from langchain_lab.mcp.mcp_servers.rag_mcp_server import mcp as mcp_server
+from langchain_lab.mcp.server_encapsulation.context_inject import bind_exec_context, setup_exec_context
 
 
 async def run_single_mcp_session():

@@ -13,7 +13,7 @@ from pathlib import Path
 from mcp.server.mcpserver import MCPServer
 
 from langchain_lab.core.config.config_core import get_config
-from langchain_lab.mcp.context_inject import bind_exec_context, get_exec_context, setup_exec_context
+from langchain_lab.mcp.server_encapsulation.context_inject import bind_exec_context, get_exec_context, setup_exec_context
 from langchain_lab.rag.services import DocumentService, QueryService
 
 document_service = DocumentService()

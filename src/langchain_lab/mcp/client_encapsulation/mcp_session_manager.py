@@ -6,7 +6,7 @@ from langchain_core.tools import BaseTool, tool
 from mcp import ClientSession
 from mcp.types import TextContent
 
-from langchain_lab.mcp.mcp_client_session import MCPStreamableSession
+from langchain_lab.mcp.client_encapsulation.mcp_client_session import MCPStreamableSession
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.MCP)
@@ -42,17 +42,27 @@ class MCPSessionManager:
             if cache_key in self._cache_sess:
                 return self._cache_sess[cache_key]
 
-            session = MCPStreamableSession(server_url=server_url)
-            await session.set_context_meta(
-                override={
-                    "tenant_id": tenant_id,
-                    "user_id": user_id,
-                    "is_tenant_admin": str(session_ctx.get("is_tenant_admin", False)).lower(),
-                },
-                extra={k: v for k, v in session_ctx.items() if k not in {"tenant_id", "user_id", "is_tenant_admin"}},
-            )
-            # 设置完 Header 后主动建连，确保 _session 可用
-            await session._ensure_session()
+        # 锁外：创建+初始化，允许并发，这里会产生完整连接的session
+        session = MCPStreamableSession(server_url=server_url)
+        await session.set_context_meta(
+            override={
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "is_tenant_admin": str(session_ctx.get("is_tenant_admin", False)).lower(),
+            },
+            extra={k: v for k, v in session_ctx.items() if k not in {"tenant_id", "user_id", "is_tenant_admin"}},
+        )
+        # 设置完 Header 后主动建连，确保 _session 可用
+        await session._ensure_session()
+
+        # 再次上锁二次校验
+        async with self._lock:
+            if cache_key in self._cache_sess:
+                # 别的协程抢先完成初始化，缓存已经存在
+                # 👉绝对不能直接丢弃session！必须手动close，在当前协程关闭异步生成器，交给GC必炸
+                await session.close()
+                return self._cache_sess[cache_key]
+            # 当前session有效，存入缓存持有引用，不会被GC回收
             self._cache_sess[cache_key] = session
             return session
 
