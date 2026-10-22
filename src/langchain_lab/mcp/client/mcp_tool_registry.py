@@ -303,9 +303,13 @@ def _make_mcp_tool(
         """自定义 mcp 工具执行逻辑，只执行，不捕获异常，异常上浮至于工具中间件中捕获"""
         if session_ctx is None:
             session_ctx = {}
-        sess = await _session_mgr.get_session(mcp_id, server_url, session_ctx)
+        # 用 get_session_for_call：取会话时立即续期，避免慢调用进行中被巡检断连
+        sess = await _session_mgr.get_session_for_call(mcp_id, server_url, session_ctx)
         # 统一走 session.call_tool()，内部自动 _ensure_session + 提取文本
-        return await sess.call_tool(original_name, kwargs)
+        result = await sess.call_tool(original_name, kwargs)
+        # 调用结束再续期一次：重新计时，保证调用后仍有完整 idle_timeout
+        await _session_mgr.touch(mcp_id, session_ctx)
+        return result
 
     # 正确调用方式：先传工具名 + 配置，返回装饰器，再装饰函数
     # 1. 第一个参数传字符串（工具名），后面全是关键字参数

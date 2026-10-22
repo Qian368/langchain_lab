@@ -52,9 +52,8 @@ class MCPSessionManager:
 
         async with self._lock:
             if cache_key in self._cache_sess:
-                # LRU：命中标记为最近使用
+                # LRU：命中标记为最近使用（不再续 TTL，TTL 只在真实工具调用后由 touch 续）
                 self._cache_sess.move_to_end(cache_key)
-                self._last_used[cache_key] = time.time()
                 return self._cache_sess[cache_key]
 
         # 锁外：创建+初始化，允许并发，这里会产生完整连接的session
@@ -77,11 +76,11 @@ class MCPSessionManager:
                 # 别的协程抢先完成初始化，缓存已经存在
                 await session.close()
                 self._cache_sess.move_to_end(cache_key)
-                self._last_used[cache_key] = time.time()
                 return self._cache_sess[cache_key]
             # 当前session有效，存入缓存持有引用
             self._cache_sess[cache_key] = session
             self._cache_sess.move_to_end(cache_key)
+            # 新建会话：记录初始使用时间（从创建时刻开始计时 TTL）
             self._last_used[cache_key] = time.time()
             # LRU 淘汰：超过上限时弹出最久未访问的会话
             while len(self._cache_sess) > self._session_cache_max_size:
@@ -95,6 +94,23 @@ class MCPSessionManager:
                 await evicted_session.close()
 
         return session
+
+    async def get_session_for_call(self, mcp_id: str, server_url: str, session_ctx: dict[str, Any]) -> MCPStreamableSession:
+        """面向真实工具调用的接头：取会话 + 立即续期 TTL，一步到位。
+        调用发起即续期，避免慢调用进行中被巡检断连。
+        """
+        sess = await self.get_session(mcp_id, server_url, session_ctx)
+        await self.touch(mcp_id, session_ctx)
+        return sess
+
+    async def touch(self, mcp_id: str, session_ctx: dict[str, Any]) -> None:
+        """标记会话为活跃（仅真实工具调用后调用），续期 TTL。
+        元数据刷新(get_session)不再续期，只在这里续，避免“聊不停就永远不断连”。
+        """
+        key = (mcp_id, session_ctx.get("tenant_id"), session_ctx.get("user_id"))
+        async with self._lock:
+            if key in self._cache_sess:
+                self._last_used[key] = time.time()
 
     async def remove_session(self, mcp_id: str, tenant_id: str, user_id: str) -> bool:
         """

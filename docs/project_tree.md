@@ -1,6 +1,6 @@
 # 项目目录结构
 
-- 生成时间：`2026-10-22 16:44:26`
+- 生成时间：`2026-10-23 02:58:22`
 - 项目根目录：`E:\project-dev\ai-agent\practice\langchain_lab`
 
 ```text
@@ -45,8 +45,9 @@ langchain_lab/
 │   │   │   │   └── llm_schema.py
 │   │   │   ├── tools/
 │   │   │   │   ├── __init__.py
-│   │   │   │   ├── tool_middleware.py
-│   │   │   │   └── tools.py
+│   │   │   │   ├── base_tools.py
+│   │   │   │   ├── tool_disclosure.py
+│   │   │   │   └── tool_middleware.py
 │   │   │   ├── __init__.py
 │   │   │   ├── agent_session.py
 │   │   │   ├── messages.py
