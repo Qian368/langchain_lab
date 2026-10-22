@@ -96,10 +96,11 @@ def _build_tools_from_mcp_metas(metas: list[Tool], session: ClientSession) -> li
 # ========== 通用会话类 ==========
 class MCPStreamableSession:
     """
-    Streamable HTTP 会话管理类（通用元数据版）
+    Streamable HTTP 流式会话类
     - 支持任意上下文元数据透传，不限制字段
     - 对齐服务端 override / extra 双语义
     - 保留 set_identity 便捷方法，兼容现有调用
+    - 独立后台任务创建会话，提供拿工具，调用工具接口
     """
 
     def __init__(self, server_url: str):
@@ -108,8 +109,14 @@ class MCPStreamableSession:
         self._extra_meta: dict[str, str] = {}
 
         self._session: ClientSession | None = None
-        self._stream_ctx = None
-        self._session_ctx = None
+
+        # ========== 独立宿主任务相关状态 ==========
+        # 核心：streamable_http_client + ClientSession 两层 async with
+        # 全部封闭在 _host_coro 这个独立后台任务里，不污染主任务上下文
+        self._host_task: asyncio.Task | None = None
+        self._stream_ready: asyncio.Future[ClientSession] | None = None  # 宿主建好流+初始化完 session 后通知外部
+        self._shutdown_event: asyncio.Event | None = None  # 外部发关闭信号给宿主
+        self._http_client: httpx2.AsyncClient | None = None
 
         self._tool_cache: list[BaseTool] | None = None
         self._tool_meta_cache: list[Tool] | None = None
@@ -132,11 +139,9 @@ class MCPStreamableSession:
 
         self._tool_cache = None
         self._tool_meta_cache = None
-        # ✅ 修复：直接 await 重置，不用后台任务，消除 anyio API 报错
+        # 直接 await 重置，不用后台任务，消除 anyio API 报错
         if self._session is not None:
             await self._reset_session()
-            # ✅ 关键：重置后让出事件循环，等后台清理任务收尾， 试了，没用
-            # await asyncio.sleep(1)
 
     # ===== 便捷方法（兼容现有代码，内部调用通用方法） =====
     async def set_identity(self, tenant_id: str, user_id: str, is_admin: bool = False):
@@ -149,12 +154,35 @@ class MCPStreamableSession:
             }
         )
 
+    async def ensure_session(self):
+        # 如果已有会话且宿主任务还活着，直接复用
+        if self._session is not None and self._host_task is not None and not self._host_task.done():
+            return
+
+        # 有残留状态（宿主异常退出等），先清理干净
+        if self._session is not None or self._host_task is not None:
+            await self._reset_session()
+
+        # 初始化同步原语
+        self._stream_ready = asyncio.Future()
+        self._shutdown_event = asyncio.Event()
+
+        # 启动宿主任务（CancelScope 封闭在这个任务内部，不泄漏到当前调用方）
+        self._host_task = asyncio.create_task(self._host_coro())
+
+        try:
+            self._session = await self._stream_ready
+        except (asyncio.CancelledError, Exception) as e:
+            # 建连失败，关闭清理所有资源
+            await self._reset_session()
+            raise RuntimeError(f"MCP 会话连接失败，已关闭会话。底层异常： {e!s}") from e
+
     # 只拿壳，缓存原生元数据，注册器走这个
     async def get_tool_metas(self) -> list[Tool]:
         """只拿工具壳，只缓存原生工具元数据，减轻缓存负担，注册器走这个"""
         if self._tool_meta_cache is not None:
             return self._tool_meta_cache
-        await self._ensure_session()
+        await self.ensure_session()
         # 底层仍然是官方标准 API list_tools
         assert self._session is not None
         resp = await self._session.list_tools()
@@ -165,58 +193,94 @@ class MCPStreamableSession:
         """生成绑定当前会话的可执行 _MCPTool，供直接使用session的场景（discover/调试）"""
         if self._tool_cache is not None:
             return self._tool_cache
-        await self._ensure_session()
+        await self.ensure_session()
         assert self._session is not None
-        self._tool_cache = await load_mcp_tools(self._session)
+        self._tool_cache = await load_mcp_tools(self._session)  # 独立缓存，不连带缓存壳。
         return self._tool_cache
+
+    # ========== 统一工具调用入口，外部不用再摸 _session 私有属性 ==========
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        """
+        统一工具调用：自动确保连接存活 + 调用 MCP + 提取文本结果
+        外部（registry 的 _tool_runner）直接调这个，不用再碰 _session / TextContent
+        """
+        await self.ensure_session()
+        assert self._session is not None
+        result = await self._session.call_tool(name=tool_name, arguments=arguments)
+        return "\n".join(c.text for c in result.content if isinstance(c, TextContent))
 
     async def close(self):
         await self._reset_session()
 
-    async def _reset_session(self):
-        if self._session_ctx:
-            with contextlib.suppress(BaseException):
-                await self._session_ctx.__aexit__(None, None, None)
-            self._session_ctx = None
-            self._session = None
-        if self._stream_ctx:
-            with contextlib.suppress(BaseException):
-                await self._stream_ctx.__aexit__(None, None, None)
-            self._stream_ctx = None
-
-        self.server_url = ""
-        self._override_meta = {}
-        self._extra_meta = {}
-
-        self._tool_meta_cache = None
-        self._tool_cache = None
-
-        # ✅ 重置后让出事件循环，等后台任务收尾
-        await asyncio.sleep(0)
-
-    async def _ensure_session(self):
-        if self._session is not None:
-            return
-
-        # 组装 Header：override 走 X-Meta-Override- 前缀，extra 走 X-Meta-Extra- 前缀
+    # ========== 宿主任务协程——唯一持有 streamable_http_client + ClientSession 的地方 ==========
+    async def _host_coro(self):
+        """
+        宿主任务：
+        两层 async with（streamable_http_client + ClientSession）全部封闭在这个任务内部。
+        两层自带的 anyio TaskGroup/CancelScope 都绑定宿主任务，不泄漏到主任务上下文。
+        """
+        # 组装 Header
         headers = {}
         for k, v in self._override_meta.items():
             headers[f"X-Meta-Override-{k}"] = v
         for k, v in self._extra_meta.items():
             headers[f"X-Meta-Extra-{k}"] = v
 
-        http_client = httpx2.AsyncClient(headers=headers)
-        self._stream_ctx = streamable_http_client(self.server_url, http_client=http_client)
+        self._http_client = httpx2.AsyncClient(headers=headers)
         try:
-            read_stream, write_stream = await self._stream_ctx.__aenter__()
-            self._session_ctx = ClientSession(read_stream, write_stream)
-            session = await self._session_ctx.__aenter__()
+            # ClientSession.__aenter__() 内部会创建自己的 anyio TaskGroup，
+            # 这个 TaskGroup 现在绑定宿主任务，不再绑定主任务。
+            async with (
+                streamable_http_client(self.server_url, http_client=self._http_client) as (read_stream, write_stream),
+                ClientSession(read_stream, write_stream) as mcp_session,
+            ):
+                await mcp_session.initialize()
 
-            await session.initialize()
-            self._session = session
-        except (asyncio.CancelledError, Exception) as e:
-            await self.close()
-            raise RuntimeError(f"MCP 会话连接失败，已关闭会话。底层异常： {e!s}") from e
+                # 初始化完成，把 session 抛给外部任务
+                if self._stream_ready and not self._stream_ready.done():
+                    self._stream_ready.set_result(mcp_session)
+
+                # 【核心阻塞点】等待关闭信号，维持两层 async with 存活 = 保持长连接
+                assert self._shutdown_event is not None
+                await self._shutdown_event.wait()
+                # event 被 set 后：
+                # 1. 先退出 ClientSession async with → 它内部 cancel_scope.cancel() → 只取消宿主任务
+                # 2. 再退出 streamable_http_client async with → 它内部 cancel_scope.cancel() → 只取消宿主任务
+        except BaseException as exc:
+            # 建连阶段异常，通过 future 传递给等待中的外部任务
+            if self._stream_ready and not self._stream_ready.done():
+                self._stream_ready.set_exception(exc)
+            # 运行中异常直接抛出，宿主任务结束
+            raise
+        finally:
+            # 关闭 http 客户端
+            if self._http_client:
+                with contextlib.suppress(BaseException):
+                    await self._http_client.aclose()
+                self._http_client = None
+
+    async def _reset_session(self):
+        # ClientSession 的 async with 现在在宿主任务内部，
+        # 退出时由宿主任务自己执行 __aexit__，它的 cancel_scope.cancel() 只作用宿主任务。
+        # 这里只做：发关闭信号给宿主 → 等宿主收尾 → 清空状态引用
+
+        # 1. 通知宿主任务退出两层 async with（幂等，多次 set 无害）
+        if self._shutdown_event is not None and not self._shutdown_event.is_set():
+            self._shutdown_event.set()
+
+        # 2. 等待宿主任务完成收尾（宿主自己依次退出 ClientSession 和 streamable_http_client）
+        if self._host_task is not None:
+            with contextlib.suppress(BaseException):
+                await self._host_task
+            self._host_task = None
+
+        # 3. 清空所有状态引用
+        self._session = None
+        self._stream_ready = None
+        self._shutdown_event = None
+
+        self._tool_meta_cache = None
+        self._tool_cache = None
 
     async def __aenter__(self):
         return self

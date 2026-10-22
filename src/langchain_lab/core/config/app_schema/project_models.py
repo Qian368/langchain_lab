@@ -5,6 +5,7 @@
 """
 
 from pathlib import Path
+from typing import TypedDict
 
 from pydantic import Field
 
@@ -25,9 +26,18 @@ class ProjectBackupSettings(EventedModel):
     backup_dir: Path = Field(default_factory=lambda: Path("./data/backup"))
 
 
+class ProjectCtxSettings(EventedModel):
+    """应用上下文配置"""
+
+    user_id: str = ""
+    tenant_id: str = ""
+    trace_id: str = ""
+    is_tenant_admin: bool = False
+
+
 class ProjectSettings(EventedModel):
     """应用全局配置"""
 
     root: ProjectRootSettings = Field(default_factory=ProjectRootSettings)
     backup: ProjectBackupSettings = Field(default_factory=ProjectBackupSettings)
-    session_ctx: dict = Field(default_factory=lambda: {"user_id": "u_001", "tenant_id": "t_001", "trace_id": "tr_abc123", "is_tenant_admin": False})
+    session_ctx: dict = Field(default_factory=ProjectCtxSettings().model_dump)

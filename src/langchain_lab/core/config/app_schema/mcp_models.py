@@ -36,9 +36,28 @@ class McpTenantGrant(EventedModel):
     tenant_id: str = ""
 
 
+class McpClientConfig(EventedModel):
+    """MCP 客户端配置"""
+
+    session_idle_timeout: float = 10 * 60  # 空闲超时：10分钟没被使用就断开
+    session_check_interval: float = 60  # 巡检间隔：每分钟扫一次
+    session_cache_max_size: int = 1000  # 会话缓存 LRU 上限，超过淘汰最久未访问的
+    identity_cache_max_size: int = 5000  # 身份维度工具缓存 LRU 上限，超过淘汰最久未访问的
+
+
 class MCPSettings(EventedModel):
     """MCP 全局配置"""
 
     ctx_template: SessionCtxTemplate = Field(default_factory=SessionCtxTemplate)
     servers: list[McpServerDefinition] = Field(default_factory=list)
     grants: list[McpTenantGrant] = Field(default_factory=list)
+    client_cfg: McpClientConfig = Field(default_factory=lambda: shared_client_cfg)
+
+
+# 全局唯一的客户端配置实例
+shared_client_cfg = McpClientConfig(
+    session_idle_timeout=10 * 60,
+    session_check_interval=60,
+    session_cache_max_size=1000,
+    identity_cache_max_size=5000,
+)

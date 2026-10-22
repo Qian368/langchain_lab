@@ -1,11 +1,12 @@
 # 项目目录结构
 
-- 生成时间：`2026-10-12 17:56:25`
+- 生成时间：`2026-10-22 16:44:26`
 - 项目根目录：`E:\project-dev\ai-agent\practice\langchain_lab`
 
 ```text
 langchain_lab/
 ├── .vscode/
+│   ├── launch.json
 │   └── settings.json
 ├── config/
 │   ├── llm.yaml
@@ -24,13 +25,13 @@ langchain_lab/
 │   ├── langchain_lab/
 │   │   ├── core/
 │   │   │   ├── config/
-│   │   │   │   ├── app_scheme/
+│   │   │   │   ├── app_schema/
 │   │   │   │   │   ├── __init__.py
 │   │   │   │   │   ├── llm_models.py
 │   │   │   │   │   ├── mcp_models.py
 │   │   │   │   │   ├── project_models.py
 │   │   │   │   │   └── rag_models.py
-│   │   │   │   ├── ident_scheme/
+│   │   │   │   ├── ident_schema/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── _config.py
 │   │   │   │   ├── _scheme.py
@@ -47,6 +48,7 @@ langchain_lab/
 │   │   │   │   ├── tool_middleware.py
 │   │   │   │   └── tools.py
 │   │   │   ├── __init__.py
+│   │   │   ├── agent_session.py
 │   │   │   ├── messages.py
 │   │   │   └── pipeline.py
 │   │   ├── experiments/
@@ -59,6 +61,22 @@ langchain_lab/
 │   │   │   ├── exp6_base_retrieve.py
 │   │   │   ├── exp7_rag_indexing.py
 │   │   │   └── exp8_rag_querying.py
+│   │   ├── mcp/
+│   │   │   ├── client/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── mcp_session_manager.py
+│   │   │   │   ├── mcp_stdio_client.py
+│   │   │   │   ├── mcp_streamable_session.py
+│   │   │   │   └── mcp_tool_registry.py
+│   │   │   ├── mcp_tools/
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── rag_mcp_server.py
+│   │   │   ├── server/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── context_inject.py
+│   │   │   │   ├── mcp_stdio_server.py
+│   │   │   │   └── mcp_streamable_http_server.py
+│   │   │   └── __init__.py
 │   │   ├── rag/
 │   │   │   ├── api/
 │   │   │   │   ├── __init__.py

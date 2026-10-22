@@ -6,3 +6,9 @@ project:
 
   backup:
     backup_dir: "./data/backup"
+
+  session_ctx:
+    user_id: "u_001"
+    tenant_id: "t_001"
+    trace_id: "tr_abc123"
+    is_tenant_admin: false

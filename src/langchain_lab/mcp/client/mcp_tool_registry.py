@@ -1,14 +1,15 @@
 import asyncio
-from typing import Any, cast
+from collections import OrderedDict
+from typing import Any
 
 from langchain_core.tools import BaseTool, tool
-from mcp import ClientSession
-from mcp.types import TextContent
 
-from langchain_lab.mcp.client_encapsulation.mcp_session_manager import _MCP_SERVERS, MCPSessionManager, _session_mgr
-from langchain_lab.mcp.client_encapsulation.mcp_streamable_session import MCPStreamableSession
+from langchain_lab.core.config.config_core import get_config
+from langchain_lab.mcp.client.mcp_session_manager import MCPSessionManager, _session_mgr
+from langchain_lab.mcp.client.mcp_streamable_session import MCPStreamableSession
 from langchain_lab.util.logger import LogName, setup_logger
 
+mcp_settings = get_config().mcp
 logger = setup_logger(LogName.MCP)
 
 
@@ -28,8 +29,12 @@ class MCPToolRegistry:
         # 租户授权表：{mcp_id: set(tenant_id, ...)}
         self._grants: dict[str, set[str]] = {}
 
-        # 工具缓存：key = (tenant_id, user_id)
-        self._tool_cache: dict[tuple, list[BaseTool]] = {}
+        # 身份维度工具缓存：OrderedDict 实现 LRU，key = (tenant_id, user_id)
+        self._identity_tool_cache: OrderedDict[tuple, list[BaseTool]] = OrderedDict()
+        # 从配置读取 LRU 上限
+        self._identity_cache_max_size = mcp_settings.client_cfg.identity_cache_max_size
+        # MCP维度公共工具缓存，key = mcp_id，同一个MCP只造一次工具对象，全局共享
+        self._mcp_tool_cache: dict[str, list[BaseTool]] = {}
         self._lock = asyncio.Lock()
 
         # 托管所有后台任务，防止 GC 回收，统一异常兜底
@@ -97,14 +102,17 @@ class MCPToolRegistry:
         获取当前身份可用的所有 MCP 工具
         内部自动合并权限筛选、连接复用、命名空间前缀
         """
-        tenant_id = session_ctx.get("tenant_id", "t_001")
-        user_id = session_ctx.get("user_id", "u_001")
+        tenant_id = session_ctx.get("tenant_id")
+        user_id = session_ctx.get("user_id")
         cache_key = (tenant_id, user_id)
 
-        # 命中缓存直接返回
+        if tenant_id is None or user_id is None:
+            return []
+        # 命中缓存直接返回（LRU：标记为最近使用）
         async with self._lock:
-            if cache_key in self._tool_cache:
-                return self._tool_cache[cache_key]
+            if cache_key in self._identity_tool_cache:
+                self._identity_tool_cache.move_to_end(cache_key)
+                return self._identity_tool_cache[cache_key]
 
         # 1. 筛选当前租户有权限的 MCP
         available_mcps = self._filter_available_mcps(tenant_id)
@@ -121,9 +129,12 @@ class MCPToolRegistry:
                 logger.warning(f"加载 MCP {mcp_id} 工具失败：{e!s}")
                 continue
 
-        # 写入缓存
+        # 写入缓存（LRU：超限淘汰最久未访问的）
         async with self._lock:
-            self._tool_cache[cache_key] = all_mcp_tools
+            self._identity_tool_cache[cache_key] = all_mcp_tools
+            self._identity_tool_cache.move_to_end(cache_key)
+            while len(self._identity_tool_cache) > self._identity_cache_max_size:
+                self._identity_tool_cache.popitem(last=False)
 
         return all_mcp_tools
 
@@ -136,13 +147,15 @@ class MCPToolRegistry:
         return available
 
     async def _get_mcp_tools(self, mcp_id: str, session_ctx: dict[str, Any]) -> list[BaseTool]:
-        """获取单个 MCP 的工具列表（复用会话管理器的连接）"""
+        """获取单个 MCP 的工具列表"""
+
+        # 先查MCP维度公共缓存，命中直接返回共享引用，不重复造对象
+        if mcp_id in self._mcp_tool_cache:
+            return self._mcp_tool_cache[mcp_id]
+
         server_url = self._server_defs[mcp_id]["url"]
         sess = await self._session_mgr.get_session(mcp_id, server_url, session_ctx)
-
-        # 不拿完整工具 raw_tools = await sess.get_tools()
-        # 拿工具壳，不再获取完整 _MCPTool 对象
-        raw_metas = await sess.get_tool_metas()
+        raw_metas = await sess.get_tool_metas()  # 无状态工具
 
         wrapped: list[BaseTool] = []
         for meta in raw_metas:
@@ -157,23 +170,28 @@ class MCPToolRegistry:
                     args_schema=meta.input_schema,
                 )
             )
+
+        # 写入公共缓存，后续所有身份直接复用
+        self._mcp_tool_cache[mcp_id] = wrapped
         return wrapped
 
     # ===================== 缓存管理 =====================
     def _invalidate_cache_by_mcp(self, mcp_id: str) -> None:
         """失效所有包含该 MCP 的工具缓存"""
-        # 全量清空，简单可靠；量小无需精细化
-        self._tool_cache.clear()
+        # 全量清空身份维度缓存，简单可靠；量小无需精细化
+        self._identity_tool_cache.clear()
+        # 同时清掉MCP维度公共工具缓存，下次重建时重新拉取工具列表
+        self._mcp_tool_cache.pop(mcp_id, None)
 
     def _invalidate_cache_by_tenant(self, tenant_id: str) -> None:
         """失效指定租户的所有工具缓存"""
-        keys_to_remove = [k for k in self._tool_cache if k[0] == tenant_id]
+        keys_to_remove = [k for k in self._identity_tool_cache if k[0] == tenant_id]
         for k in keys_to_remove:
-            self._tool_cache.pop(k, None)
+            self._identity_tool_cache.pop(k, None)
 
     def invalidate_all_cache(self) -> None:
         """手动清空全部工具缓存"""
-        self._tool_cache.clear()
+        self._identity_tool_cache.clear()
 
     # ===================== 内部工具：后台任务托管 =====================
     def _run_background(self, coro, name: str) -> None:
@@ -195,6 +213,8 @@ _mcp_tool_registry = MCPToolRegistry(_session_mgr)
 
 from langchain_lab.core.config.app_schema.mcp_models import MCPSettings
 from langchain_lab.core.config.config_core import get_config
+
+mcp_settings = get_config().mcp
 
 
 def init_mcp_from_config(mcp_settings: MCPSettings) -> None:
@@ -220,7 +240,7 @@ def init_mcp_from_config(mcp_settings: MCPSettings) -> None:
         except Exception as e:
             logger.warning(f"MCP 授权加载失败 {grant_cfg.mcp_id}/{grant_cfg.tenant_id}：{e!s}")
 
-    logger.info("已完成 MCP 服务与授权初始化")
+    logger.info("已完成 MCP 服务配置与授权配置初始化加载")
 
 
 def bind_mcp_config_to_registry(mcp_settings: MCPSettings) -> None:
@@ -264,7 +284,6 @@ def bind_mcp_config_to_registry(mcp_settings: MCPSettings) -> None:
 
 
 # ========== 全局初始化 ==========
-mcp_settings = get_config().mcp
 init_mcp_from_config(mcp_settings)
 bind_mcp_config_to_registry(mcp_settings)
 
@@ -285,11 +304,8 @@ def _make_mcp_tool(
         if session_ctx is None:
             session_ctx = {}
         sess = await _session_mgr.get_session(mcp_id, server_url, session_ctx)
-        # 双重保险：调用前确保连接存活，异常断开自动重连
-        await sess._ensure_session()
-        client_session = cast(ClientSession, sess._session)
-        result = await client_session.call_tool(name=original_name, arguments=kwargs)
-        return "\n".join(c.text for c in result.content if isinstance(c, TextContent))
+        # 统一走 session.call_tool()，内部自动 _ensure_session + 提取文本
+        return await sess.call_tool(original_name, kwargs)
 
     # 正确调用方式：先传工具名 + 配置，返回装饰器，再装饰函数
     # 1. 第一个参数传字符串（工具名），后面全是关键字参数
@@ -311,37 +327,38 @@ def _make_mcp_tool(
 # ========== 核心：自动发现 + 批量包装 ==========
 async def discover_mcp_tools(mcp_id: str) -> list[BaseTool]:
     """
-    自动发现指定 MCP 服务的所有工具，批量生成标准 BaseTool
+    跳过鉴权：自动发现指定 MCP 服务的所有工具，批量生成标准 BaseTool
     - 自动加 {mcp_id}__ 命名空间前缀
     - 自动支持 session_ctx 参数注入身份 Header
     - 输出和本地工具完全兼容，可直接丢给 Agent
     - 连接失败时优雅降级，返回空列表，不抛出异常
     """
-    server_url = _MCP_SERVERS.get(mcp_id)
-    if not server_url:
+    wrapped: list[BaseTool] = []
+    for server in mcp_settings.servers:
+        if mcp_id != server.mcp_id:
+            continue
+        server_url = server.url
+        try:
+            # 临时会话拉取工具元数据
+            async with MCPStreamableSession(server_url) as tmp_session:
+                raw_metas = await tmp_session.get_tool_metas()
+        except Exception as e:
+            # 所有连接/初始化异常全部兜底，打警告返回空
+            logger.warning(f"加载 MCP {mcp_id} 工具失败：{e!s}")
+            continue
+
+        for meta in raw_metas:
+            public_name = f"{mcp_id}__{meta.name}"
+            wrapped.append(
+                _make_mcp_tool(
+                    mcp_id=mcp_id,
+                    server_url=server_url,
+                    original_name=meta.name,
+                    public_name=public_name,
+                    description=meta.description or "",
+                    args_schema=meta.input_schema,
+                )
+            )
+    if not wrapped:
         logger.warning(f"MCP 服务 {mcp_id} 未配置，跳过加载")
-        return []
-
-    try:
-        # 临时会话拉取工具元数据
-        async with MCPStreamableSession(server_url) as tmp_session:
-            raw_tools = await tmp_session.get_tools()
-    except BaseException as e:
-        # 所有连接/初始化异常全部兜底，打警告返回空
-        logger.warning(f"MCP 服务 {mcp_id} 连接失败，工具加载失败：{e!s}")
-        return []
-
-    wrapped_tools = []
-    for raw_tool in raw_tools:
-        public_name = f"{mcp_id}__{raw_tool.name}"
-        wrapped_tool = _make_mcp_tool(
-            mcp_id=mcp_id,
-            server_url=server_url,
-            original_name=raw_tool.name,
-            public_name=public_name,
-            description=raw_tool.description or "",
-            args_schema=raw_tool.args_schema,
-        )
-        wrapped_tools.append(wrapped_tool)
-
-    return wrapped_tools
+    return wrapped

@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from prompt_toolkit import prompt
 
 from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
-from langchain_lab.core.tools.tools import get_base_tools
+from langchain_lab.core.tools.base_tools import get_base_tools
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.EXPER)

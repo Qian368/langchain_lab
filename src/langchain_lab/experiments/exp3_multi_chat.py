@@ -14,9 +14,9 @@ from prompt_toolkit import PromptSession
 
 from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
+from langchain_lab.core.tools.tool_disclosure import get_disclosure_tools, get_init_tools
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
-from langchain_lab.core.tools.tools import get_full_tools
-from langchain_lab.mcp.client_encapsulation.mcp_session_manager import _session_mgr
+from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
 from langchain_lab.util.prompt_style import Printer, bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印
@@ -38,9 +38,9 @@ async def main():
     try:
         llm = await asyncio.to_thread(get_llm)
         # tools = await preload_all_tools()
-        tools = await get_full_tools(session_ctx)
-        print(f"当前可用工具集有：{[tool.name for tool in tools]}")
-        llm_with_tools = llm.bind_tools(tools=tools)
+        all_tools = await get_init_tools(session_ctx)
+        print(f"当前可用工具集有：{[tool.name for tool in all_tools]}")
+        llm_with_tools = llm.bind_tools(tools=all_tools)
         printer.reset_all_state()
 
         printer.begin("X" * 50 + " 开始你的多轮对话 " + "X" * 50)
@@ -80,7 +80,12 @@ async def main():
                 printer.warning("X" * 50 + " 用户选择终止 " + "X" * 50 + "\n\n")
                 break
             messages.append(HumanMessage(content=human_prompt))
-            messages = await _single_chat_loop(tools=tools, llm_with_tools=llm_with_tools, messages=messages, session_ctx=session_ctx)
+
+            # 调用 llm 前刷新工具
+            visible_tools = await get_disclosure_tools(session_ctx, messages)
+            llm_with_tools = llm.bind_tools(tools=visible_tools)
+
+            messages = await _single_chat_loop(tools=all_tools, llm_with_tools=llm_with_tools, messages=messages, session_ctx=session_ctx)
             print("\n\n" + "=" * 38 + '\033[1;32m 继续聊天 or 输入"0" 退出 \033[0m' + "=" * 40)
 
     except ModelNotFoundError as e:

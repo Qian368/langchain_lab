@@ -13,7 +13,7 @@ from pathlib import Path  # noqa: F401
 from mcp.server.mcpserver import MCPServer
 
 from langchain_lab.core.config.config_core import get_config
-from langchain_lab.mcp.server_encapsulation.context_inject import bind_exec_context, get_exec_context, setup_exec_context
+from langchain_lab.mcp.server.context_inject import bind_exec_context, get_exec_context, setup_exec_context
 from langchain_lab.rag.services import DocumentService, QueryService
 
 document_service = DocumentService()
@@ -56,24 +56,24 @@ async def rag_query_hybrid(question: str, top_k: int = 4) -> list[dict]:
     )
 
 
-@mcp.tool()
-def rag_list_documents(status: str | None = None, skip: int = 0, limit: int = 20) -> dict:
-    """列出当前租户可见文档，支持分页和状态过滤（pending/indexed/failed）。
-    返回 {"items": [...], "total": N}。"""
-    identity = get_exec_context()
-    limit = min(limit, 100)
-    items, total = document_service.list_documents(
-        tenant_id=identity.tenant_id,
-        user_id=identity.user_id,
-        is_tenant_admin=identity.is_tenant_admin,
-        status=status,
-        skip=skip,
-        limit=limit,
-    )
-    return {"items": items, "total": total}
-
-
 # region 不必要暴露的内容
+# @mcp.tool()
+# def rag_list_documents(status: str | None = None, skip: int = 0, limit: int = 20) -> dict:
+#     """列出当前租户可见文档，支持分页和状态过滤（pending/indexed/failed）。
+#     返回 {"items": [...], "total": N}。"""
+#     identity = get_exec_context()
+#     limit = min(limit, 100)
+#     items, total = document_service.list_documents(
+#         tenant_id=identity.tenant_id,
+#         user_id=identity.user_id,
+#         is_tenant_admin=identity.is_tenant_admin,
+#         status=status,
+#         skip=skip,
+#         limit=limit,
+#     )
+#     return {"items": items, "total": total}
+
+
 # @mcp.tool()
 # def rag_get_document(doc_id: str) -> dict:
 #     """获取单个文档详情（含全文）。租户不匹配返回错误。"""

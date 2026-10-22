@@ -5,6 +5,12 @@ mcp:
     is_tenant_admin: false
     extra: {}
 
+  client_cfg:
+    session_idle_timeout: 600  # MCP 会话 TTL 空闲超时：10分钟 = 600秒,没被使用就断开
+    session_check_interval: 60  # MCP 会话 TTL 巡检间隔：每分钟扫一次
+    session_cache_max_size: 1000  # 会话缓存 LRU 上限，超过淘汰最久未访问的
+    identity_cache_max_size: 5000 # 身份维度工具缓存 LRU 上限，超过淘汰最久未访问的
+
   # MCP 服务定义（全局唯一）
   servers:
     # 公共服务：所有租户默认可见
@@ -33,7 +39,7 @@ mcp:
 
     # t_001 租户可以访问财务系统
     - mcp_id: "finance_system"
-      tenant_id: "t_001"
+      tenant_id: "t_002"
 
     # t_002 租户只能访问 CRM，不能访问财务
     - mcp_id: "internal_crm"
