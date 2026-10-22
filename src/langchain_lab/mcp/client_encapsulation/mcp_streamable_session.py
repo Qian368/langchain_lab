@@ -6,7 +6,7 @@ import httpx2
 from langchain_core.tools import ArgsSchema, BaseTool
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import TextContent
+from mcp.types import TextContent, Tool
 from pydantic import BaseModel, create_model
 
 
@@ -73,6 +73,26 @@ async def load_mcp_tools(session: ClientSession) -> list[BaseTool]:
     return tools
 
 
+# 单工具版：签名和官方 as_langchain_tool 完全对齐
+# 现在是我们自己实现，未来内部换成官方 as_langchain_tool 即可，外部调用零改动
+# > 预留，暂时不用
+def _as_langchain_tool(meta: Tool, session: ClientSession) -> BaseTool:
+    args_schema = cast(ArgsSchema, _schema_to_pydantic(meta.input_schema))
+    return _MCPTool(
+        name=meta.name,
+        description=meta.description or "",
+        args_schema=args_schema,
+        tool_name=meta.name,
+        _session_ref=lambda: session,
+    )
+
+
+# 批量版（上层调用）
+# > 预留，暂时不用
+def _build_tools_from_mcp_metas(metas: list[Tool], session: ClientSession) -> list[BaseTool]:
+    return [_as_langchain_tool(meta, session) for meta in metas]
+
+
 # ========== 通用会话类 ==========
 class MCPStreamableSession:
     """
@@ -82,14 +102,17 @@ class MCPStreamableSession:
     - 保留 set_identity 便捷方法，兼容现有调用
     """
 
-    def __init__(self, server_url: str = "http://127.0.0.1:8000/mcp"):
+    def __init__(self, server_url: str):
         self.server_url = server_url
         self._override_meta: dict[str, str] = {}
         self._extra_meta: dict[str, str] = {}
+
         self._session: ClientSession | None = None
-        self._tool_cache: list[BaseTool] | None = None
         self._stream_ctx = None
         self._session_ctx = None
+
+        self._tool_cache: list[BaseTool] | None = None
+        self._tool_meta_cache: list[Tool] | None = None
 
     # ===== 通用元数据方法（推荐生产用） =====
     async def set_context_meta(
@@ -108,6 +131,7 @@ class MCPStreamableSession:
             self._extra_meta = {str(k): str(v) for k, v in extra.items()}
 
         self._tool_cache = None
+        self._tool_meta_cache = None
         # ✅ 修复：直接 await 重置，不用后台任务，消除 anyio API 报错
         if self._session is not None:
             await self._reset_session()
@@ -125,7 +149,20 @@ class MCPStreamableSession:
             }
         )
 
+    # 只拿壳，缓存原生元数据，注册器走这个
+    async def get_tool_metas(self) -> list[Tool]:
+        """只拿工具壳，只缓存原生工具元数据，减轻缓存负担，注册器走这个"""
+        if self._tool_meta_cache is not None:
+            return self._tool_meta_cache
+        await self._ensure_session()
+        # 底层仍然是官方标准 API list_tools
+        assert self._session is not None
+        resp = await self._session.list_tools()
+        self._tool_meta_cache = resp.tools
+        return self._tool_meta_cache
+
     async def get_tools(self) -> list[BaseTool]:
+        """生成绑定当前会话的可执行 _MCPTool，供直接使用session的场景（discover/调试）"""
         if self._tool_cache is not None:
             return self._tool_cache
         await self._ensure_session()
@@ -146,6 +183,14 @@ class MCPStreamableSession:
             with contextlib.suppress(BaseException):
                 await self._stream_ctx.__aexit__(None, None, None)
             self._stream_ctx = None
+
+        self.server_url = ""
+        self._override_meta = {}
+        self._extra_meta = {}
+
+        self._tool_meta_cache = None
+        self._tool_cache = None
+
         # ✅ 重置后让出事件循环，等后台任务收尾
         await asyncio.sleep(0)
 
@@ -171,7 +216,7 @@ class MCPStreamableSession:
             self._session = session
         except (asyncio.CancelledError, Exception) as e:
             await self.close()
-            raise RuntimeError(f"MCP 会话连接失败，会话已关闭底层异常： {e!s}") from e
+            raise RuntimeError(f"MCP 会话连接失败，已关闭会话。底层异常： {e!s}") from e
 
     async def __aenter__(self):
         return self

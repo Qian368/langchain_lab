@@ -9,8 +9,7 @@ from langchain_core.tools import BaseTool, InjectedToolArg, tool
 from pydantic import BaseModel, Field
 
 from langchain_lab.core.config._config import RAG_API_BASE
-from langchain_lab.mcp.client_encapsulation.mcp_session_manager import discover_mcp_tools
-from langchain_lab.mcp.client_encapsulation.mcp_tool_registry import _mcp_tool_registry
+from langchain_lab.mcp.client_encapsulation.mcp_tool_registry import _mcp_tool_registry, discover_mcp_tools
 
 # from langchain_core.runnables import RunnableConfig
 

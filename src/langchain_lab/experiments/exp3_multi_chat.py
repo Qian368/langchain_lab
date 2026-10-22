@@ -16,6 +16,7 @@ from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.llm.llm import ModelNotFoundError, get_llm
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
 from langchain_lab.core.tools.tools import get_full_tools
+from langchain_lab.mcp.client_encapsulation.mcp_session_manager import _session_mgr
 from langchain_lab.util.prompt_style import Printer, bindings
 
 # 屏蔽 httpx 的INFO 级别日志，调用llm时会打印
@@ -85,6 +86,10 @@ async def main():
     except ModelNotFoundError as e:
         logging.warning(f"模型选择错误：{e}")
         raise
+    finally:
+        # ✅ 【唯一正确位置】整个聊天程序要退出前，在这里清空所有MCP会话
+        print("程序停机，开始关闭所有 MCP 长连接")
+        await _session_mgr.clear_all()
 
 
 async def _single_chat_loop(
