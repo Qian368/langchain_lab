@@ -3,6 +3,8 @@
 - 输入事件化：订阅 USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED / SESSION_COMMAND，按 session_id 过滤
 - 不解析用户输入：指令的识别与合法性校验由客户端/适配器完成，转成语义化事件后发布；
   运行时只响应事件（SESSION_COMMAND 按 action 处理分支等），不感知终端指令语法
+- 控制钩子（AgentHooks，默认 None）：pre_user_message / post_llm / post_tool 三个同步可干预埋点，
+  返回值 None=放行、非None=替换、raise=拒绝；与事件总线分工（总线观察、钩子干预）
 - 输出事件化：展示/进度全部 publish（STREAM/TOOL/ASSISTANT/AGENT_TURN/...）
 - 副作用订阅者化：不持有 store/view；每轮发布 SESSION_STATE_UPDATED（完整可序列化快照），
   持久化由订阅者（context_store）落库；恢复的历史由入口构造注入，会话不碰数据库
@@ -13,6 +15,7 @@
 - 不碰 MCP 连接：MCP 生命周期归 MCPSessionManager，clear_all() 由运行时入口 finally 调用
 """
 import asyncio
+import inspect
 import json
 from typing import cast
 
@@ -27,6 +30,7 @@ from langchain_core.messages import (
 )
 from langchain.tools import BaseTool
 
+from langchain_lab.core.agent_hooks import AgentHooks
 from langchain_lab.core.context.compressor import SessionCompressor
 from langchain_lab.core.event_bus import EventBus
 from langchain_lab.core.events import Event, EventType
@@ -45,6 +49,7 @@ class ChatSession:
         llm,
         tools: list[BaseTool],  # 全量工具集（入口构建后注入）
         compressor: SessionCompressor | None = None,  # 可选，上下文压缩（投影策略，运行时调用）
+        hooks: AgentHooks | None = None,  # 控制型钩子（校验/改写/拒绝；默认 None 不侵入）
         branch_id: str = "root",  # 当前分支
         system_prompt: str = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务",
         max_llm_loop: int = 3,  # 单轮 LLM 最大迭代（入口按 runtime.yaml 注入）
@@ -61,6 +66,7 @@ class ChatSession:
         self._llm = llm
         self._tools = tools
         self._compressor = compressor
+        self._hooks = hooks or AgentHooks()  # 空钩子集，无侵入
         self._branch_id = branch_id
         self._max_llm_loop = max_llm_loop
         self._max_tool_calls = max_tool_calls
@@ -77,6 +83,17 @@ class ChatSession:
         bus.subscribe(EventType.USER_MESSAGE_SUBMITTED, self._on_user_message)
         bus.subscribe(EventType.COMPRESS_REQUESTED, self._on_compress_requested)
         bus.subscribe(EventType.SESSION_COMMAND, self._on_command)
+
+    # —— 控制钩子执行器（统一返回值语义）——
+    @staticmethod
+    async def _run_hook(hook, arg):
+        """执行钩子：None=放行原样；非None=替换；async 自动 await；异常冒泡=拒绝"""
+        if hook is None:
+            return arg
+        result = hook(arg)
+        if inspect.isawaitable(result):
+            result = await result
+        return arg if result is None else result
 
     # —— 输入事件（async handler，由 event_bus 后台调度）——
     def _on_user_message(self, event: Event):
@@ -197,7 +214,8 @@ class ChatSession:
         """处理一条普通用户消息（适配器已确认非指令）→ Agent 推理；末尾统一发状态快照"""
         self._emit(EventType.AGENT_TURN_START)
         try:
-            # 普通用户消息：追加 + 回显 + 披露工具 + Agent 循环
+            # 控制钩子① pre_user_message：输入合法性校验/脱敏/改写（None=原样，str=替换，raise=拒绝）
+            content = await self._run_hook(self._hooks.pre_user_message, content)
             self._messages.append(HumanMessage(content=content))
             self._emit(EventType.HUMAN_MESSAGE_RECEIVED, payload=content)
             visible_tools = await get_disclosure_tools(self._session_ctx, self._messages)
@@ -287,6 +305,8 @@ class ChatSession:
             if not full_chunk:
                 break
 
+            # —— 控制钩子② post_llm：LLM 合法输出校验/替换（None=原样，非None=替换，raise=拒绝）——
+            full_chunk = await self._run_hook(self._hooks.post_llm, full_chunk)
             self._messages.append(full_chunk)
             self._emit(EventType.ASSISTANT_MESSAGE_EMITTED, payload=full_chunk)
 
@@ -307,6 +327,8 @@ class ChatSession:
                     result = await execute_safe_tool_call(
                         tool_call=tc, tools=self._tools, session_ctx=self._session_ctx, tool_index=i
                     )
+                    # —— 控制钩子③ post_tool：工具执行结果校验/脱敏/替换（None=原样，dict=替换，raise=拒绝）——
+                    result = await self._run_hook(self._hooks.post_tool, result)
                     self._messages.append(
                         ToolMessage(
                             content=json.dumps(result["content"], ensure_ascii=False),
