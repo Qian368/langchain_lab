@@ -17,7 +17,7 @@ from langchain_core.messages import BaseMessage, messages_from_dict, messages_to
 
 
 class SessionStore:
-    """SQLite 会话存储：save 整轮/整会话，load 按分支读回"""
+    """SQLite 会话存储：save 整轮/整会话，load 按分支读回，list 按租户/用户列出"""
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
@@ -107,3 +107,21 @@ class SessionStore:
         if not rows:
             return []
         return messages_from_dict([json.loads(r[0]) for r in rows])
+
+    # —— 列出（SaaS 检索预留）——
+    async def list_sessions(self, user_id: str, tenant_id: str) -> list[dict]:
+        """按 user/tenant 列出会话元数据（id/title/status/时间戳），按最近更新倒序"""
+        return await asyncio.to_thread(self._list_sessions_sync, user_id, tenant_id)
+
+    def _list_sessions_sync(self, user_id, tenant_id):
+        with sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                """SELECT session_id, title, status, created_at, updated_at
+                   FROM sessions WHERE user_id=? AND tenant_id=?
+                   ORDER BY updated_at DESC""",
+                (user_id, tenant_id),
+            ).fetchall()
+        return [
+            {"session_id": r[0], "title": r[1], "status": r[2], "created_at": r[3], "updated_at": r[4]}
+            for r in rows
+        ]
