@@ -9,6 +9,7 @@ from pydantic import Field
 from langchain_lab.core.config.app_schema.mcp_models import MCPSettings
 from langchain_lab.core.config.app_schema.project_models import ProjectSettings
 from langchain_lab.core.config.app_schema.rag_models import RagSettings
+from langchain_lab.core.config.app_schema.runtime_models import RuntimeSettings
 from langchain_lab.core.config.evented_model import EventedModel
 from langchain_lab.core.llm.llm_schema import LLMConfig
 
@@ -24,3 +25,4 @@ class AppConfig(EventedModel):
     rag: RagSettings = Field(default_factory=RagSettings)
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
