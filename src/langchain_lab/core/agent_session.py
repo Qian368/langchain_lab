@@ -6,6 +6,7 @@
   - 输入交互通过注入的 view.prompt_async()（交互层归 view）
 - 压缩（可选）：SessionCompressor 注入，LLM 视图 = 摘要置顶 + 最近 N 轮（_llm_messages），
   _messages 保持全量供持久化/前端折叠
+- 分支：branch_id 实例状态；:branch/:branches/:switch 命令；快照式存储
 - 不碰 MCP 连接：MCP 连接生命周期归 MCPSessionManager，clear_all() 由运行时入口 finally 调用
 """
 import json
@@ -44,6 +45,7 @@ class ChatSession:
         tools: list[BaseTool],  # 全量工具集（入口构建后注入）
         store=None,  # SessionStore：可选，持久化（每轮 save + close 兜底）
         compressor: SessionCompressor | None = None,  # 可选，上下文压缩
+        branch_id: str = "root",  # 当前分支
         system_prompt: str = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务",
     ):
         self._session_id = session_id
@@ -54,26 +56,31 @@ class ChatSession:
         self._tools = tools
         self._store = store
         self._compressor = compressor
+        self._branch_id = branch_id
         self._messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
         self._summary: str | None = None  # 会话级压缩摘要（存 sessions.summary）
 
     # —— 生命周期 ——
     async def resume(self) -> None:
-        """从持久化恢复（store 提供 load），无持久化/无记录则保持新建状态"""
+        """从持久化恢复（store 提供 load_branch），无持久化/无记录则保持新建状态"""
         if self._store is not None:
-            restored = await self._store.load(self._session_id)
+            restored = await self._store.load_branch(self._session_id, self._branch_id)
             if restored is not None:
                 self._messages = restored
                 self._summary = await self._store.load_summary(self._session_id)
 
     async def run(self) -> None:
-        """主循环：输入 → 披露工具 → Agent 循环（搬 exp3 main + _single_chat_loop）"""
+        """主循环：输入 → 分支命令 → 披露工具 → Agent 循环（搬 exp3 main + _single_chat_loop）"""
         self._emit(EventType.SESSION_CREATED)
 
         while True:
             human_prompt = await self._view.prompt_async("请向你的助手发送消息(shift + enter 换行)：\n> ")
             if human_prompt == "0":
                 break
+            # 分支命令：:branch <N> / :branches / :switch <id>
+            if human_prompt.startswith(":"):
+                if await self._handle_command(human_prompt):
+                    continue
             self._messages.append(HumanMessage(content=human_prompt))
             self._emit(EventType.HUMAN_MESSAGE_RECEIVED, payload=human_prompt)
 
@@ -88,10 +95,14 @@ class ChatSession:
                 if new_summary is not None:
                     self._summary = new_summary
 
-            # 每轮结束落库（崩溃安全，带摘要）；持久化归 store，MCP 连接归 MCPSessionManager
+            # 每轮结束落库（崩溃安全，带摘要+分支）；持久化归 store，MCP 连接归 MCPSessionManager
             if self._store is not None:
                 await self._store.save(
-                    self._session_id, self._messages, session_ctx=self._session_ctx, summary=self._summary
+                    self._session_id,
+                    self._messages,
+                    session_ctx=self._session_ctx,
+                    branch_id=self._branch_id,
+                    summary=self._summary,
                 )
 
     async def close(self) -> None:
@@ -100,8 +111,68 @@ class ChatSession:
         await self._bus.flush()  # 等后台 async handler（若有）完成
         if self._store is not None:
             await self._store.save(
-                self._session_id, self._messages, session_ctx=self._session_ctx, summary=self._summary
+                self._session_id,
+                self._messages,
+                session_ctx=self._session_ctx,
+                branch_id=self._branch_id,
+                summary=self._summary,
             )
+
+    # —— 分支命令 ——
+    async def _handle_command(self, raw: str) -> bool:
+        """处理 :branch/:branches/:switch；命中返回 True，否则 False（当作普通输入）"""
+        parts = raw.strip().split(maxsplit=1)
+        cmd = parts[0]
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd == ":branches":
+            if self._store is None:
+                self._view.info("无持久化，无法列出分支")
+                return True
+            branches = await self._store.list_branches(self._session_id)
+            if not branches:
+                self._view.info("暂无分支")
+                return True
+            for b in branches:
+                mark = " *" if b["branch_id"] == self._branch_id else ""
+                self._view.output(f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}{mark}")
+            return True
+
+        if cmd == ":branch":
+            if not arg.isdigit() or int(arg) < 1:
+                self._view.info("用法：:branch <N>  (N=对话消息序号，从1开始，不含系统提示)")
+                return True
+            n = int(arg)
+            if n >= len(self._messages):
+                self._view.info(f"序号 {n} 超出当前消息数（{len(self._messages) - 1} 条对话）")
+                return True
+            if self._store is None:
+                self._view.info("无持久化，无法创建分支")
+                return True
+            new_branch = await self._store.create_branch(self._session_id, self._branch_id, branch_point_seq=n)
+            # 快照式：子分支初始 = 父分支拐点前（含系统提示 + 前 N 条对话）
+            self._messages = self._messages[: n + 1]
+            self._branch_id = new_branch
+            self._view.info(f"已创建分支 {new_branch}（拐点 seq={n}），后续输入进入该分支")
+            return True
+
+        if cmd == ":switch":
+            if not arg:
+                self._view.info("用法：:switch <branch_id>")
+                return True
+            if self._store is None:
+                self._view.info("无持久化，无法切换分支")
+                return True
+            restored = await self._store.load_branch(self._session_id, arg)
+            if restored is None:
+                self._view.info(f"会话不存在")
+                return True
+            self._branch_id = arg
+            self._messages = restored
+            self._view.info(f"已切换到分支 {arg}（{len(restored) - 1} 条对话）")
+            return True
+
+        return False
 
     # —— 内部 ——
     @property
