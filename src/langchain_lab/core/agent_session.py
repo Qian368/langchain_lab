@@ -1,14 +1,16 @@
 """ChatSession：消息总线上的 Agent 会话 actor（面向网络服务化，事件驱动）
 
-- 输入事件化：订阅 USER_MESSAGE_SUBMITTED（终端/http 适配器发布），按 session_id 过滤
+- 输入事件化：订阅 USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED（终端/http 适配器发布），按 session_id 过滤
 - 输出事件化：展示/进度全部 publish（STREAM/TOOL/ASSISTANT/AGENT_TURN/...）
 - 副作用订阅者化：不持有 store/view；每轮发布 SESSION_STATE_UPDATED（完整可序列化快照），
   持久化由订阅者（context_store）落库；恢复的历史由入口构造注入，会话不碰数据库
+- 压缩后置事件化：每轮结束发 COMPRESS_REQUESTED(force=False) 自动触发，前端可手动提前(force=True)；
+  压缩在 asyncio.Lock 内串行生成摘要并更新 _summary（供 LLM 视图），摘要落库由 ContextStore 订阅 CONTEXT_COMPRESSED 完成
 - 分支命令走注入回调（branch_loader/lister/creator），入口用 context_store 实现
-- 压缩（可选）：SessionCompressor 注入，LLM 视图 = 摘要置顶 + 最近 N 轮
 - 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入
 - 不碰 MCP 连接：MCP 生命周期归 MCPSessionManager，clear_all() 由运行时入口 finally 调用
 """
+import asyncio
 import json
 from typing import cast
 
@@ -68,8 +70,10 @@ class ChatSession:
         self._branch_loader = branch_loader
         self._branch_lister = branch_lister
         self._branch_creator = branch_creator
+        self._compress_lock = asyncio.Lock()  # 压缩串行化（自动/手动并发不竞态）
         # 订阅输入事件（网络服务化：输入适配器 publish，本会话响应；按 session_id 隔离）
         bus.subscribe(EventType.USER_MESSAGE_SUBMITTED, self._on_user_message)
+        bus.subscribe(EventType.COMPRESS_REQUESTED, self._on_compress_requested)
 
     # —— 输入事件（async handler，由 event_bus 后台调度）——
     def _on_user_message(self, event: Event):
@@ -78,6 +82,26 @@ class ChatSession:
             return None
         content = str((event.payload or {}).get("content", ""))
         return self._handle_turn(content)
+
+    def _on_compress_requested(self, event: Event):
+        """订阅压缩触发：自动(force=False)或前端手动(force=True) → 异步生成摘要"""
+        if event.session_id != self._session_id:
+            return None
+        if self._compressor is None:
+            return None
+        return self._do_compress(event)
+
+    async def _do_compress(self, event: Event) -> None:
+        """串行压缩：更新 _summary（供 LLM 视图）；摘要落库由 ContextStore 订阅 CONTEXT_COMPRESSED 完成"""
+        payload = event.payload or {}
+        force = bool(payload.get("force", False))
+        keep = payload.get("keep")
+        async with self._compress_lock:
+            new_summary = await self._compressor.maybe_compress(
+                self._messages, self._summary, force=force, keep_turns=keep
+            )
+            if new_summary is not None:
+                self._summary = new_summary
 
     # —— 生命周期 ——
     async def start(self, resumed: bool = False) -> None:
@@ -105,13 +129,6 @@ class ChatSession:
                 visible_tools = await get_disclosure_tools(self._session_ctx, self._messages)
                 llm_with_tools = self._llm.bind_tools(tools=visible_tools)
                 await self._agent_loop(llm_with_tools=llm_with_tools)
-                # 压缩检查：超阈值则把早期轮压缩进摘要（LLM 视图 = 摘要 + 最近 N 轮）
-                if self._compressor is not None:
-                    new_summary = await self._compressor.maybe_compress(
-                        self._messages, self._summary
-                    )
-                    if new_summary is not None:
-                        self._summary = new_summary
             # 命令或消息都会改变状态：发布完整快照，持久化订阅者落库（事件即真相）
             self._emit_session_state()
             self._emit(
@@ -122,7 +139,9 @@ class ChatSession:
             self._emit(EventType.ERROR_OCCURRED, payload={"error": repr(exc), "phase": "agent_turn"})
         finally:
             self._emit(EventType.AGENT_TURN_DONE)
-            await self._bus.flush()  # 保证持久化订阅者已落库（后台 async handler 完成）
+            # 后置自动压缩触发（异步，不阻塞对话；压缩完成经 CONTEXT_COMPRESSED 更新 _summary）
+            self._emit(EventType.COMPRESS_REQUESTED, payload={"force": False})
+            await self._bus.flush()
 
     def _emit_session_state(self) -> None:
         """发布当前会话完整状态快照（可序列化，供持久化订阅者落库 / 前端同步）"""
