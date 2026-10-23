@@ -3,10 +3,11 @@
 架构边界（事件驱动 / 订阅者化）：
 - 输入事件化：终端适配器读输入 → publish(USER_MESSAGE_SUBMITTED) → ChatSession 订阅响应
 - 输出事件化：ChatSession 发布 STREAM/TOOL/ASSISTANT/SESSION 等事件
-- 持久化订阅者：ContextStore.subscribe_to_bus 订阅状态快照落库（事件即真相）
+- 持久化订阅者：ContextStore.subscribe_to_bus 订阅状态快照/压缩结果落库（事件即真相）
 - 展示订阅者：终端渲染订阅者【内联本入口】（不复用独立 view 模块，exp9 即展示层）
 - 恢复：入口从 ContextStore 加载 history/summary 注入 ChatSession；运行时不碰数据库
 - 分支回调：入口用 ContextStore 实现 branch_loader/lister/creator 注入会话
+- 手动压缩：终端输入 :compress [保留轮数] → publish COMPRESS_REQUESTED(force=True)（前端可提前触发）
 - 运行上限/库路径/默认提示词：按 config/runtime.yaml agent 配置注入
 - MCP 连接 clear_all() 在此 finally（服务停机语义，不放在 ChatSession 内）
 """
@@ -129,7 +130,10 @@ class _TerminalRenderer:
 
     def _on_context_compressed(self, event: Event) -> None:
         p = event.payload
-        self._printer.label_yellow(f"[上下文压缩] 早期 {p.get('compressed_turns', '?')} 轮已折叠为摘要")
+        forced = "[手动]" if p.get("forced") else "[自动]"
+        self._printer.label_yellow(
+            f"{forced}上下文压缩] 早期 {p.get('compressed_turns', '?')} 轮已折叠为摘要"
+        )
 
     def _on_error(self, event: Event) -> None:
         p = event.payload or {}
@@ -190,7 +194,7 @@ async def main() -> None:
 
     bus = EventBus()
     store = ContextStore(db_path=str(agent_cfg.session_db_path))
-    store.subscribe_to_bus(bus)  # 持久化订阅者：订阅状态快照落库
+    store.subscribe_to_bus(bus)  # 持久化订阅者：订阅状态快照/压缩结果落库
     renderer = _TerminalRenderer()  # 展示订阅者（内联 exp9）
 
     # 2. 会话选择：恢复（加载历史） or 新建
@@ -224,15 +228,23 @@ async def main() -> None:
         branch_creator=lambda parent, point: store.create_branch(session_id, parent, point),
     )
 
-    # 5. 输入事件化驱动：终端读输入 → publish → 等 AGENT_TURN_DONE
+    # 5. 输入事件化驱动：普通消息等 AGENT_TURN_DONE；手动压缩等 CONTEXT_COMPRESSED
     done = asyncio.Event()
+    compress_done = asyncio.Event()
 
     def _on_turn_done(e: Event) -> None:
         if e.session_id == session_id:
             done.set()
 
+    def _on_compressed(e: Event) -> None:
+        if e.session_id == session_id:
+            compress_done.set()
+
     bus.subscribe(EventType.AGENT_TURN_DONE, _on_turn_done)
-    renderer.info("提示：可用分支命令  :branch <N>（从第N条对话分叉）/ :branches / :switch <branch_id>")
+    bus.subscribe(EventType.CONTEXT_COMPRESSED, _on_compressed)
+    renderer.info(
+        "提示：分支命令  :branch <N> / :branches / :switch <id>；手动压缩  :compress [保留轮数]"
+    )
 
     try:
         await chat.start(resumed=history is not None)
@@ -240,6 +252,20 @@ async def main() -> None:
             human_prompt = await renderer.prompt_async("请向你的助手发送消息(shift + enter 换行)：\n> ")
             if human_prompt == "0":
                 break
+            text = human_prompt.strip()
+            if text.startswith(":compress"):
+                # 前端/终端手动提前压缩（force=True，可指定保留轮数；未指定用 runtime 阈值）
+                keep = None
+                parts = text.split(maxsplit=1)
+                if len(parts) > 1 and parts[1].isdigit():
+                    keep = int(parts[1])
+                compress_done.clear()
+                bus.publish(Event(EventType.COMPRESS_REQUESTED, session_id, {"force": True, "keep": keep}))
+                try:
+                    await asyncio.wait_for(compress_done.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    renderer.info("无可压早期轮或压缩未完成")
+                continue
             done.clear()
             bus.publish(Event(EventType.USER_MESSAGE_SUBMITTED, session_id, {"content": human_prompt}))
             await done.wait()  # 等会话处理完这一轮（持久化订阅者已 flush 落库）
