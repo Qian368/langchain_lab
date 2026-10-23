@@ -3,8 +3,8 @@
 - 会话不引用本 store：会话每轮发布 SESSION_STATE_UPDATED（完整可序列化快照），
   本订阅者收到后落库；SESSION_CLOSED 标记会话关闭并兜底落库。
 - 入口用它加载历史（load_branch / load_summary）注入会话，并实现分支操作回调。
+- 公开 save/load 仅供入口写库与测试；运行时持久化一律走订阅者（事件即真相）。
 - schema 面向 SaaS 检索 / 压缩归档 / 会话分支 预留。
-- 序列化 LangChain messages_to_dict / from_dict；sqlite3 同步 + asyncio.to_thread。
 - 分支存储采用【快照式】：子分支自包含完整历史；load_branch 统一读本分支全量。
 """
 import asyncio
@@ -13,9 +13,8 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any
 
-from langchain_core.messages import BaseMessage, messages_from_dict
+from langchain_core.messages import BaseMessage, messages_from_dict, messages_to_dict
 
 from langchain_lab.core.event_bus import EventBus
 from langchain_lab.core.events import Event, EventType
@@ -90,7 +89,25 @@ class ContextStore:
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("UPDATE sessions SET status='closed' WHERE session_id=?", (event.session_id,))
 
-    # —— 保存 ——
+    # ===================== 保存（公开，供入口写库与测试；运行时持久化走订阅者） =====================
+    async def save(
+        self,
+        session_id: str,
+        messages: list[BaseMessage],
+        session_ctx: dict | None = None,
+        branch_id: str = "root",
+        summary: str | None = None,
+    ) -> None:
+        """兼容入口/测试：BaseMessage 列表落库（内部转可序列化 dict）"""
+        dicts = messages_to_dict(messages)
+        await asyncio.to_thread(
+            self._save_snapshot_sync, session_id, dicts, session_ctx, branch_id, summary
+        )
+
+    async def load(self, session_id: str, branch_id: str = "root") -> list[BaseMessage] | None:
+        """别名：加载指定分支历史；会话不存在返回 None"""
+        return await self.load_branch(session_id, branch_id)
+
     def _save_snapshot_sync(
         self,
         session_id: str,
