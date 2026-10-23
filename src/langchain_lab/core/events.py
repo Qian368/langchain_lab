@@ -19,6 +19,8 @@ class EventType(StrEnum):
     # —— 完整事件：累积完成，给持久化（落库）——
     ASSISTANT_MESSAGE_EMITTED = "assistant_message_emitted"
     TURN_COMPLETE = "turn_complete"
+    # —— 上下文压缩：早期轮归档为摘要（持久化更新 summary + 展示提示）——
+    CONTEXT_COMPRESSED = "context_compressed"
 
 
 @dataclass(slots=True)
