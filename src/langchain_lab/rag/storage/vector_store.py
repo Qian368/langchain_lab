@@ -11,7 +11,7 @@ import chromadb
 from chromadb.api.models.Collection import Collection
 from chromadb.base_types import Metadata
 
-from langchain_lab.core.config._config import CHROMA_COLLECTION, CHROMA_PATH
+from langchain_lab.core.config.config_core import get_config
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.RAG)
@@ -21,10 +21,12 @@ type EmbeddingVec = Sequence[float]
 class VectorStore:
     """Chroma 封装，对齐Mongo、MetaDB的仓储范式"""
 
-    def __init__(self, path: str | Path = CHROMA_PATH, collection_name: str = CHROMA_COLLECTION):
-        self.client = chromadb.PersistentClient(path=str(path))
+    def __init__(self, path: str | Path | None = None, collection_name: str | None = None):
+        # 未显式传入则读统一配置 rag.chroma.*（原硬编码 CHROMA_PATH/CHROMA_COLLECTION 已收敛）
+        chroma_cfg = get_config().rag.chroma
+        self.client = chromadb.PersistentClient(path=str(path) if path is not None else str(chroma_cfg.path))
         self.collection: Collection = self.client.get_or_create_collection(
-            name=collection_name,
+            name=collection_name or chroma_cfg.collection,
             metadata={"hnsw:space": "cosine"},
         )
 
