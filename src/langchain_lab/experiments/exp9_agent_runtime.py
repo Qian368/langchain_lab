@@ -1,7 +1,8 @@
 """实验9：事件驱动 Agent 运行时入口（独立运行时，不动 exp3）
 
-- 组装：配置注入 session_ctx / LLM / 全量工具 / EventBus / TerminalView / SessionStore
+- 组装：配置注入 session_ctx / LLM / 全量工具 / EventBus / TerminalView / SessionStore / 压缩器
 - 会话选择：列出已有（恢复）或新建（uuid4）
+- 压缩：按 config/runtime.yaml 的 compression 配置构建 SessionCompressor（可选）
 - ChatSession 只做消息会话；MCP 连接 clear_all() 在此 finally（服务停机语义）
 """
 import asyncio
@@ -10,10 +11,11 @@ import uuid
 from langchain_lab.core.agent_session import ChatSession
 from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.event_bus import EventBus
+from langchain_lab.core.session_compressor import SessionCompressor
 from langchain_lab.core.session_store import SessionStore
 from langchain_lab.core.terminal_view import TerminalView
 from langchain_lab.core.tools.tool_disclosure import get_init_tools
-from langchain_lab.core.llm.llm import get_llm
+from langchain_lab.core.llm.llm import build_llm, get_llm
 from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
 from langchain_lab.util.prompt_style import Printer
 
@@ -36,6 +38,24 @@ async def _pick_session(printer: Printer, view: TerminalView, store: SessionStor
     return str(uuid.uuid4())
 
 
+def _build_compressor(bus: EventBus, session_id: str) -> SessionCompressor | None:
+    """按 runtime 配置构建压缩器；未启用返回 None（R3：配置注入）"""
+    comp_cfg = get_config().runtime.compression
+    if not comp_cfg.enabled:
+        return None
+    llm_cfg = get_config().llm
+    inst_name = comp_cfg.summarize_model or llm_cfg.default_instance
+    if not inst_name or inst_name not in llm_cfg.instances:
+        raise ValueError(f"压缩摘要模型实例 '{inst_name}' 未在 config/llm.yaml 中配置")
+    summarize_llm = build_llm(llm_cfg.instances[inst_name])
+    return SessionCompressor(
+        summarize_llm=summarize_llm,
+        keep_recent_turns=comp_cfg.keep_recent_turns,
+        bus=bus,
+        session_id=session_id,
+    )
+
+
 async def main() -> None:
     # 1. 组装（全部构造注入，无模块级全局单例依赖）
     session_ctx = get_config().project.session_ctx
@@ -53,11 +73,10 @@ async def main() -> None:
     session_id = await _pick_session(printer, view, store, session_ctx)
 
     # 3. system prompt（可回车跳过默认）
-    system_prompt = (
-        await view.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")
-    ) or DEFAULT_SYSTEM_PROMPT
+    system_prompt = (await view.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")) or DEFAULT_SYSTEM_PROMPT
 
-    # 4. 组装 ChatSession + 绑定订阅者
+    # 4. 组装 ChatSession + 压缩器 + 绑定订阅者
+    compressor = _build_compressor(bus, session_id)
     chat = ChatSession(
         session_id=session_id,
         session_ctx=session_ctx,
@@ -66,12 +85,13 @@ async def main() -> None:
         view=view,
         tools=all_tools,
         store=store,
+        compressor=compressor,
         system_prompt=system_prompt,
     )
     view.bind(bus, session_id)
 
     try:
-        await chat.resume()  # 恢复历史（如有）
+        await chat.resume()  # 恢复历史（含摘要）
         await chat.run()  # 主循环
     finally:
         await chat.close()  # flush + save + SESSION_CLOSED
