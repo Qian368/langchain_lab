@@ -3,9 +3,8 @@
 - 自持 Printer 实例（不复用 prompt_style 模块级单例 printer，守 R1：无全局单例）
 - 订阅展示类事件，按 session_id 过滤渲染（多会话隔离基础）
 - 输入交互归 view（prompt_async）
-- HUMAN_MESSAGE_RECEIVED 回显用户输入：用蓝色系渲染，区别于模型输出的 MAGENTA，
-  为将来前端聊天对话框的结构化交互预留（不改事件模型即可换展示）
-- 行为对拍：核心内容（流式/工具/终止）与 exp3 一致；"模型答复>" 等装饰标签近似复刻
+- HUMAN_MESSAGE_RECEIVED 回显用户输入：用蓝色系渲染，区别于模型输出的 MAGENTA
+- 行为对拍：核心内容（流式/工具/终止）与 exp3 一致；装饰标签近似复刻
 """
 from langchain_lab.core.event_bus import EventBus
 from langchain_lab.core.events import Event, EventType
@@ -20,6 +19,7 @@ _DISPLAY_EVENTS = (
     EventType.ASSISTANT_MESSAGE_EMITTED,  # 仅用于重置状态，不渲染内容（避免与流式重复）
     EventType.TOOL_CALL_START,
     EventType.TOOL_RESULT,
+    EventType.CONTEXT_COMPRESSED,
 )
 
 
@@ -54,6 +54,7 @@ class TerminalView:
             EventType.ASSISTANT_MESSAGE_EMITTED: self._on_assistant_emitted,
             EventType.TOOL_CALL_START: self._on_tool_call_start,
             EventType.TOOL_RESULT: self._on_tool_result,
+            EventType.CONTEXT_COMPRESSED: self._on_context_compressed,
         }.get(event.type)
         if handler is not None:
             handler(event)
@@ -88,3 +89,8 @@ class TerminalView:
     def _on_tool_result(self, event: Event) -> None:
         content = event.payload.get("content")
         self._printer.output(f"        └─ 执行结果：{content}")
+
+    def _on_context_compressed(self, event: Event) -> None:
+        # 压缩归档提示：早期轮已折叠为摘要（前端视图的"早期历史已折叠"占位对应）
+        p = event.payload
+        self._printer.label_yellow(f"[上下文压缩] 早期 {p.get('compressed_turns', '?')} 轮已折叠为摘要")
