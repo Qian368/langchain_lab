@@ -17,6 +17,7 @@ def show_menu():
     print("实验4： 提示词模板")
     print("实验5： LCEL 管道")
     print("实验6： 构建本地文本向量仓库，完事就可以进入实验3 进行多轮对话啦")
+    print("实验9： 事件驱动运行时（exp3 的事件化 + 持久化独立版，不动 exp3）")
     print("0. 退出")
     print("=" * 50)
 
@@ -47,6 +48,7 @@ def main():
         "4": "exp4_prompt_template",
         "5": "exp5_lcel_pipeline",
         "6": "exp6_base_retrieve",
+        "9": "exp9_agent_runtime",
     }
 
     while True:
