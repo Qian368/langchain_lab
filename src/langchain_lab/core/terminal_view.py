@@ -2,7 +2,7 @@
 
 - 自持 Printer 实例（不复用 prompt_style 模块级单例 printer，守 R1：无全局单例）
 - 订阅展示类事件，按 session_id 过滤渲染（多会话隔离基础）
-- 输入交互归 view（prompt_async）
+- 输入交互归 view（prompt_async）；info/output 公开方法供会话/入口打印提示
 - HUMAN_MESSAGE_RECEIVED 回显用户输入：用蓝色系渲染，区别于模型输出的 MAGENTA
 - 行为对拍：核心内容（流式/工具/终止）与 exp3 一致；装饰标签近似复刻
 """
@@ -41,6 +41,13 @@ class TerminalView:
     # —— 输入交互（归 view）——
     async def prompt_async(self, text: str) -> str:
         return await self._printer.prompt_async(text, style_name=self._printer.style_name.MESSAGE)
+
+    # —— 公开打印（供会话/入口输出提示，展示归 view，R2）——
+    def info(self, text: str) -> None:
+        self._printer.info(text)
+
+    def output(self, text: str) -> None:
+        self._printer.output(text)
 
     # —— 事件渲染 ——
     def _on_event(self, event: Event) -> None:
