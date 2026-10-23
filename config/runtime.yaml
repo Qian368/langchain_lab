@@ -1,0 +1,5 @@
+# 运行时配置（独立一域一 yaml，由 ConfigLoader 统一加载）
+compression:
+  enabled: true          # 是否启用上下文压缩
+  keep_recent_turns: 6   # 压缩后保留的最近轮数（LLM 视图只保留最近 N 轮 + 摘要置顶）
+  summarize_model: default  # 压缩摘要用的 LLM 实例名（对应 config/llm.yaml 的 instances 键）
