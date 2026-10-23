@@ -6,6 +6,9 @@
   - sessions.summary（LLM 压缩摘要，各分支共享）/ user_id / tenant_id（SaaS 检索）
   - messages.branch_id + seq（分支内独立编号）
   - branches（branch_id / parent_id / branch_point_seq）：分支树，拐点定位
+
+分支存储采用【快照式】：子分支自包含完整历史（分叉时复制父分支拐点前），
+load_branch 统一读本分支全量；branches 表的 parent_id/point 记录语义与分支树展示。
 """
 import asyncio
 import json
@@ -119,7 +122,7 @@ class SessionStore:
         return await self.load_branch(session_id, branch_id)
 
     async def load_branch(self, session_id: str, branch_id: str = "root") -> list[BaseMessage] | None:
-        """按分支取完整历史：子分支 = 父分支拐点前(seq<=point) + 本分支消息；root = 全量"""
+        """快照式：统一读本分支全量；会话不存在返回 None"""
         return await asyncio.to_thread(self._load_branch_sync, session_id, branch_id)
 
     def _load_branch_sync(self, session_id, branch_id):
@@ -131,33 +134,14 @@ class SessionStore:
                 return None
             if branch_id != "root":
                 branch = conn.execute(
-                    "SELECT parent_id, branch_point_seq FROM branches WHERE branch_id=? AND session_id=?",
-                    (branch_id, session_id),
+                    "SELECT 1 FROM branches WHERE branch_id=? AND session_id=?", (branch_id, session_id)
                 ).fetchone()
                 if branch is None:
                     raise ValueError(f"分支 '{branch_id}' 不存在或不属于会话 '{session_id}'")
-                parent_id, point = branch
-                rows = []
-                if parent_id:
-                    if point is not None:
-                        rows += conn.execute(
-                            "SELECT payload FROM messages WHERE session_id=? AND branch_id=? AND seq<=? ORDER BY seq",
-                            (session_id, parent_id, point),
-                        ).fetchall()
-                    else:
-                        rows += conn.execute(
-                            "SELECT payload FROM messages WHERE session_id=? AND branch_id=? ORDER BY seq",
-                            (session_id, parent_id),
-                        ).fetchall()
-                rows += conn.execute(
-                    "SELECT payload FROM messages WHERE session_id=? AND branch_id=? ORDER BY seq",
-                    (session_id, branch_id),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT payload FROM messages WHERE session_id=? AND branch_id='root' ORDER BY seq",
-                    (session_id,),
-                ).fetchall()
+            rows = conn.execute(
+                "SELECT payload FROM messages WHERE session_id=? AND branch_id=? ORDER BY seq",
+                (session_id, branch_id),
+            ).fetchall()
         if not rows:
             return []
         return messages_from_dict([json.loads(r[0]) for r in rows])
