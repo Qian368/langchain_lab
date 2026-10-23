@@ -1,12 +1,14 @@
 """ChatSession：消息总线上的 Agent 会话 actor（面向网络服务化，事件驱动）
 
-- 输入事件化：订阅 USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED（终端/http 适配器发布），按 session_id 过滤
+- 输入事件化：订阅 USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED / SESSION_COMMAND，按 session_id 过滤
+- 不解析用户输入：指令的识别与合法性校验由客户端/适配器完成，转成语义化事件后发布；
+  运行时只响应事件（SESSION_COMMAND 按 action 处理分支等），不感知终端指令语法
 - 输出事件化：展示/进度全部 publish（STREAM/TOOL/ASSISTANT/AGENT_TURN/...）
 - 副作用订阅者化：不持有 store/view；每轮发布 SESSION_STATE_UPDATED（完整可序列化快照），
   持久化由订阅者（context_store）落库；恢复的历史由入口构造注入，会话不碰数据库
 - 压缩后置事件化：每轮结束发 COMPRESS_REQUESTED(force=False) 自动触发，前端可手动提前(force=True)；
   压缩在 asyncio.Lock 内串行生成摘要并更新 _summary（供 LLM 视图），摘要落库由 ContextStore 订阅 CONTEXT_COMPRESSED 完成
-- 分支命令走注入回调（branch_loader/lister/creator），入口用 context_store 实现
+- 分支操作走注入回调（branch_loader/lister/creator），由 SESSION_COMMAND 事件触发
 - 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入
 - 不碰 MCP 连接：MCP 生命周期归 MCPSessionManager，clear_all() 由运行时入口 finally 调用
 """
@@ -74,10 +76,11 @@ class ChatSession:
         # 订阅输入事件（网络服务化：输入适配器 publish，本会话响应；按 session_id 隔离）
         bus.subscribe(EventType.USER_MESSAGE_SUBMITTED, self._on_user_message)
         bus.subscribe(EventType.COMPRESS_REQUESTED, self._on_compress_requested)
+        bus.subscribe(EventType.SESSION_COMMAND, self._on_command)
 
     # —— 输入事件（async handler，由 event_bus 后台调度）——
     def _on_user_message(self, event: Event):
-        """订阅输入：只响应本会话，返回协程由总线后台执行一轮"""
+        """订阅普通用户消息（适配器已确认非指令）：返回协程由总线后台执行一轮"""
         if event.session_id != self._session_id:
             return None
         content = str((event.payload or {}).get("content", ""))
@@ -103,6 +106,81 @@ class ChatSession:
             if new_summary is not None:
                 self._summary = new_summary
 
+    def _on_command(self, event: Event):
+        """订阅控制指令事件（适配器已解析+校验，运行时只按 action 响应）"""
+        if event.session_id != self._session_id:
+            return None
+        return self._handle_command_event(event)
+
+    async def _handle_command_event(self, event: Event) -> None:
+        """按 action 处理分支等控制指令；不解析原始文本"""
+        self._emit(EventType.AGENT_TURN_START)
+        payload = event.payload or {}
+        action = payload.get("action")
+        try:
+            if action == "branch_list":
+                await self._do_branch_list()
+            elif action == "branch_create":
+                await self._do_branch_create(payload.get("point"))
+            elif action == "branch_switch":
+                await self._do_branch_switch(payload.get("branch_id"))
+            else:
+                self._notice(f"未知指令 action={action}")
+            # 分支状态可能变化：发布快照（持久化订阅者落库）
+            self._emit_session_state()
+        except Exception as exc:  # noqa: BLE001
+            self._emit(EventType.ERROR_OCCURRED, payload={"error": repr(exc), "phase": "command"})
+        finally:
+            self._emit(EventType.AGENT_TURN_DONE)
+            await self._bus.flush()
+
+    # —— 分支操作（走注入回调，运行时不碰持久化实现）——
+    async def _do_branch_list(self) -> None:
+        if self._branch_lister is None:
+            self._notice("无上下文存储，无法列出分支")
+            return
+        branches = await self._branch_lister()
+        if not branches:
+            self._notice("暂无分支")
+            return
+        lines = [
+            f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}"
+            + (" *" if b["branch_id"] == self._branch_id else "")
+            for b in branches
+        ]
+        self._notice("分支列表：\n" + "\n".join(lines))
+
+    async def _do_branch_create(self, point) -> None:
+        """创建子分支：快照式，子分支初始 = 拐点前（含系统提示 + 前 point 条对话）"""
+        if not isinstance(point, int) or point < 1:
+            self._notice("用法：branch_create 需 point>=1（对话消息序号）")
+            return
+        if point >= len(self._messages):
+            self._notice(f"序号 {point} 超出当前消息数（{len(self._messages) - 1} 条对话）")
+            return
+        if self._branch_creator is None:
+            self._notice("无上下文存储，无法创建分支")
+            return
+        new_branch = await self._branch_creator(self._branch_id, point)
+        self._messages = self._messages[: point + 1]
+        self._branch_id = new_branch
+        self._notice(f"已创建分支 {new_branch}（拐点 seq={point}），后续输入进入该分支")
+
+    async def _do_branch_switch(self, branch_id) -> None:
+        if not branch_id:
+            self._notice("用法：branch_switch 需 branch_id")
+            return
+        if self._branch_loader is None:
+            self._notice("无上下文存储，无法切换分支")
+            return
+        restored = await self._branch_loader(branch_id)
+        if restored is None:
+            self._notice(f"分支 {branch_id} 不存在或不属于本会话")
+            return
+        self._branch_id = branch_id
+        self._messages = restored
+        self._notice(f"已切换到分支 {branch_id}（{len(restored) - 1} 条对话）")
+
     # —— 生命周期 ——
     async def start(self, resumed: bool = False) -> None:
         """会话开始：新建发 SESSION_CREATED；恢复（入口已注入 history）发 SESSION_RESUMED"""
@@ -114,22 +192,18 @@ class ChatSession:
         self._emit(EventType.SESSION_CLOSED)
         await self._bus.flush()
 
-    # —— 一轮输入处理 ——
+    # —— 一轮普通消息处理 ——
     async def _handle_turn(self, content: str) -> None:
-        """处理一条输入：分支命令 或 普通消息→Agent 推理；末尾统一发状态快照（事件溯源）"""
+        """处理一条普通用户消息（适配器已确认非指令）→ Agent 推理；末尾统一发状态快照"""
         self._emit(EventType.AGENT_TURN_START)
         try:
-            handled = False
-            if content.startswith(":"):
-                handled = await self._handle_command(content)
-            if not handled:
-                # 普通用户消息：追加 + 回显 + 披露工具 + Agent 循环
-                self._messages.append(HumanMessage(content=content))
-                self._emit(EventType.HUMAN_MESSAGE_RECEIVED, payload=content)
-                visible_tools = await get_disclosure_tools(self._session_ctx, self._messages)
-                llm_with_tools = self._llm.bind_tools(tools=visible_tools)
-                await self._agent_loop(llm_with_tools=llm_with_tools)
-            # 命令或消息都会改变状态：发布完整快照，持久化订阅者落库（事件即真相）
+            # 普通用户消息：追加 + 回显 + 披露工具 + Agent 循环
+            self._messages.append(HumanMessage(content=content))
+            self._emit(EventType.HUMAN_MESSAGE_RECEIVED, payload=content)
+            visible_tools = await get_disclosure_tools(self._session_ctx, self._messages)
+            llm_with_tools = self._llm.bind_tools(tools=visible_tools)
+            await self._agent_loop(llm_with_tools=llm_with_tools)
+            # 发布完整快照，持久化订阅者落库（事件即真相）
             self._emit_session_state()
             self._emit(
                 EventType.TURN_COMPLETE,
@@ -154,65 +228,6 @@ class ChatSession:
                 "session_ctx": self._session_ctx,
             },
         )
-
-    # —— 分支命令（走注入回调，运行时不碰持久化实现）——
-    async def _handle_command(self, raw: str) -> bool:
-        """处理 :branch/:branches/:switch；命中返回 True，否则 False（当作普通输入）"""
-        parts = raw.strip().split(maxsplit=1)
-        cmd = parts[0]
-        arg = parts[1].strip() if len(parts) > 1 else ""
-
-        if cmd == ":branches":
-            if self._branch_lister is None:
-                self._notice("无上下文存储，无法列出分支")
-                return True
-            branches = await self._branch_lister()
-            if not branches:
-                self._notice("暂无分支")
-                return True
-            lines = [
-                f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}"
-                + (" *" if b["branch_id"] == self._branch_id else "")
-                for b in branches
-            ]
-            self._notice("分支列表：\n" + "\n".join(lines))
-            return True
-
-        if cmd == ":branch":
-            if not arg.isdigit() or int(arg) < 1:
-                self._notice("用法：:branch <N>  (N=对话消息序号，从1开始，不含系统提示)")
-                return True
-            n = int(arg)
-            if n >= len(self._messages):
-                self._notice(f"序号 {n} 超出当前消息数（{len(self._messages) - 1} 条对话）")
-                return True
-            if self._branch_creator is None:
-                self._notice("无上下文存储，无法创建分支")
-                return True
-            new_branch = await self._branch_creator(self._branch_id, n)
-            # 快照式：子分支初始 = 父分支拐点前（含系统提示 + 前 N 条对话）
-            self._messages = self._messages[: n + 1]
-            self._branch_id = new_branch
-            self._notice(f"已创建分支 {new_branch}（拐点 seq={n}），后续输入进入该分支")
-            return True
-
-        if cmd == ":switch":
-            if not arg:
-                self._notice("用法：:switch <branch_id>")
-                return True
-            if self._branch_loader is None:
-                self._notice("无上下文存储，无法切换分支")
-                return True
-            restored = await self._branch_loader(arg)
-            if restored is None:
-                self._notice(f"分支 {arg} 不存在或不属于本会话")
-                return True
-            self._branch_id = arg
-            self._messages = restored
-            self._notice(f"已切换到分支 {arg}（{len(restored) - 1} 条对话）")
-            return True
-
-        return False
 
     # —— 内部 ——
     def _notice(self, text: str) -> None:

@@ -1,7 +1,7 @@
 """事件模型：事件类型枚举 + 统一事件载体（面向网络服务化）
 
 事件分级：
-- 输入驱动：外部适配器 publish，会话订阅触发一轮（USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED）
+- 输入驱动：外部适配器 publish，会话订阅触发（USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED / SESSION_COMMAND）
 - 会话生命周期：SESSION_*（创建/恢复/关闭/系统提示）
 - 轮次边界：AGENT_TURN_START / DONE（一次输入的处理开始/结束，供驱动等待+前端进度）
 - 过程事件：逐片/即时，给展示（流式打字、工具进度、用户回显）
@@ -18,15 +18,16 @@ from typing import Any
 class EventType(StrEnum):
     """全部事件类型"""
 
-    # —— 输入驱动（网络服务化：输入适配器发布，会话订阅触发）——
-    USER_MESSAGE_SUBMITTED = "user_message_submitted"
+    # —— 输入驱动（网络服务化：输入适配器解析后发布，会话订阅响应）——
+    USER_MESSAGE_SUBMITTED = "user_message_submitted"  # 普通用户消息（适配器已确认非指令）
     COMPRESS_REQUESTED = "compress_requested"  # 触发压缩：force=False 自动(每轮后置)，force=True 前端手动提前
+    SESSION_COMMAND = "session_command"  # 控制指令（适配器解析+校验后发布；运行时按 action 响应，不解析原始文本）
     # —— 会话生命周期 ——
     SESSION_CREATED = "session_created"
     SESSION_RESUMED = "session_resumed"
     SESSION_CLOSED = "session_closed"
     SESSION_NOTICE = "session_notice"  # 会话内系统提示（分支提示等），展示层渲染
-    # —— 轮次边界（一次 USER_MESSAGE 的处理开始/结束）——
+    # —— 轮次边界（一次输入的处理开始/结束）——
     AGENT_TURN_START = "agent_turn_start"
     AGENT_TURN_DONE = "agent_turn_done"
     # —— 过程事件：逐片/即时，给展示（流式打字、工具进度）——
