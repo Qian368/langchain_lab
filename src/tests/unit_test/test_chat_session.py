@@ -44,9 +44,7 @@ def test_agent_loop_emits_and_accumulates():
             session_ctx={"user_id": "u1", "tenant_id": "t1"},
             bus=bus,
             llm=None,  # _agent_loop 用传入的 llm_with_tools，不依赖 self._llm
-            view=object(),
             tools=[],
-            store=None,
         )
         fake = _FakeLlmWithTools([AIMessageChunk(content="你"), AIMessageChunk(content="好")])
         await chat._agent_loop(llm_with_tools=fake)
