@@ -7,27 +7,14 @@
 from __future__ import annotations
 
 import json
-import os
-import re
 
 from dotenv import load_dotenv
 from pydantic import Field, model_validator
 
+from langchain_lab.core.config.env_expand import expand_model_fields
 from langchain_lab.core.config.evented_model import EventedModel
 
 load_dotenv()
-
-_ENV_PATTERN = re.compile(r"\$\{([^}]+)\}|%([^%]+)%")
-
-
-def _expand_vars(value: str) -> str:
-    """展开 ${VAR} / %VAR% 环境变量：存在则替换，否则留空"""
-
-    def _replace(match: re.Match):
-        var_name = match.group(1) or match.group(2)
-        return os.getenv(var_name, "")
-
-    return _ENV_PATTERN.sub(_replace, value)
 
 
 class LLMInstanceConfig(EventedModel):
@@ -56,11 +43,7 @@ class LLMConfig(EventedModel):
     def expand_env(self):
         """统一加载后展开 ${VAR}：yaml 占位 → .env 实际值（api_key 等不落明文）"""
         for inst in self.instances.values():
-            for field in ("provider", "model", "api_key", "base_url"):
-                value = getattr(inst, field)
-                if isinstance(value, str):
-                    # 加载期赋值，绕过事件发射（_initialized 阶段不发事件）
-                    object.__setattr__(inst, field, _expand_vars(value))
+            expand_model_fields(inst, ("provider", "model", "api_key", "base_url"))
         return self
 
     def available_instances(self) -> dict[str, LLMInstanceConfig]:
