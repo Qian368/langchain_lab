@@ -1,0 +1,84 @@
+"""实验9：事件驱动 Agent 运行时入口（独立运行时，不动 exp3）
+
+- 组装：配置注入 session_ctx / LLM / 全量工具 / EventBus / TerminalView / SessionStore
+- 会话选择：列出已有（恢复）或新建（uuid4）
+- ChatSession 只做消息会话；MCP 连接 clear_all() 在此 finally（服务停机语义）
+"""
+import asyncio
+import uuid
+
+from langchain_lab.core.agent_session import ChatSession
+from langchain_lab.core.config.config_core import get_config
+from langchain_lab.core.event_bus import EventBus
+from langchain_lab.core.session_store import SessionStore
+from langchain_lab.core.terminal_view import TerminalView
+from langchain_lab.core.tools.tool_disclosure import get_init_tools
+from langchain_lab.core.llm.llm import get_llm
+from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
+from langchain_lab.util.prompt_style import Printer
+
+DEFAULT_DB_PATH = "data/sessions.db"
+DEFAULT_SYSTEM_PROMPT = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务"
+
+
+async def _pick_session(printer: Printer, view: TerminalView, store: SessionStore, session_ctx: dict) -> str:
+    """会话选择：列出已有会话 → 选编号恢复，否则回车新建"""
+    sessions = await store.list_sessions(session_ctx.get("user_id", ""), session_ctx.get("tenant_id", ""))
+    if sessions:
+        printer.info(f"已有 {len(sessions)} 个会话：")
+        for i, s in enumerate(sessions, 1):
+            printer.output(f"  [{i}] {s['title'] or '(无标题)'}  · {s['session_id'][:8]}  · {s['status']}")
+        choice = (await view.prompt_async("输入编号恢复会话（回车新建）：\n> ")).strip()
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(sessions):
+                return sessions[idx - 1]["session_id"]
+    return str(uuid.uuid4())
+
+
+async def main() -> None:
+    # 1. 组装（全部构造注入，无模块级全局单例依赖）
+    session_ctx = get_config().project.session_ctx
+    printer = Printer()
+    printer.reset_all_state()
+
+    llm = await asyncio.to_thread(get_llm)
+    all_tools = await get_init_tools(session_ctx)
+
+    bus = EventBus()
+    view = TerminalView()
+    store = SessionStore(db_path=DEFAULT_DB_PATH)
+
+    # 2. 会话选择：恢复 or 新建
+    session_id = await _pick_session(printer, view, store, session_ctx)
+
+    # 3. system prompt（可回车跳过默认）
+    system_prompt = (
+        await view.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")
+    ) or DEFAULT_SYSTEM_PROMPT
+
+    # 4. 组装 ChatSession + 绑定订阅者
+    chat = ChatSession(
+        session_id=session_id,
+        session_ctx=session_ctx,
+        bus=bus,
+        llm=llm,
+        view=view,
+        tools=all_tools,
+        store=store,
+        system_prompt=system_prompt,
+    )
+    view.bind(bus, session_id)
+
+    try:
+        await chat.resume()  # 恢复历史（如有）
+        await chat.run()  # 主循环
+    finally:
+        await chat.close()  # flush + save + SESSION_CLOSED
+        # 服务停机语义：清空所有 MCP 长连接（只在此处，不放在 ChatSession 内）
+        print("程序停机，开始关闭所有 MCP 长连接")
+        await _session_mgr.clear_all()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
