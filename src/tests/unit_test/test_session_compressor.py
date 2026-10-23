@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from langchain_lab.core.context.compressor import SessionCompressor
 from langchain_lab.core.event_bus import EventBus
 from langchain_lab.core.events import EventType
-from langchain_lab.core.session_compressor import SessionCompressor
 
 
 class _FakeLlm:
@@ -24,9 +24,14 @@ def _msgs_with_turns(n: int):
     return msgs
 
 
+def _comp(**kw):
+    return SessionCompressor(None, keep_recent_turns=kw.get("k", 6), bus=EventBus(), session_id="s1")
+
+
 def test_split_turns():
     msgs = _msgs_with_turns(2)
-    turns = SessionCompressor.split_turns(msgs)
+    comp = _comp(k=1)
+    turns = comp.split_turns(msgs)
     assert len(turns) == 2
     assert turns[0][0].content == "h0"
     assert turns[1][0].content == "h1"
