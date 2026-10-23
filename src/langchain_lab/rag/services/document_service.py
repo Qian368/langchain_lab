@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from langchain_lab.core.config._config import ALLOWED_BASE_DIRS
+from langchain_lab.core.config.config_core import get_config
 from langchain_lab.rag.loader import FileLoader, RawDocument
 from langchain_lab.rag.splitter import TextSplitter
 from langchain_lab.rag.storage import MetaDB, MongoDocumentStore, VectorStore
@@ -23,6 +23,8 @@ class DocumentService:
         self.vector = VectorStore()
         self.loader = FileLoader()
         self.splitter = TextSplitter()
+        # 允许访问的根目录（原硬编码 ALLOWED_BASE_DIRS 已收敛）
+        self._allowed_base_dirs = get_config().rag.file.allowed_base_dirs
 
     def store_file(
         self,
@@ -141,7 +143,9 @@ class DocumentService:
         只允许访问 ALLOWED_BASE_DIRS 内的目录。
         """
         folder_path = Path(folder_path).resolve()
-        allowed = any(folder_path == base.resolve() or folder_path.is_relative_to(base.resolve()) for base in ALLOWED_BASE_DIRS)
+        allowed = any(
+            folder_path == base.resolve() or folder_path.is_relative_to(base.resolve()) for base in self._allowed_base_dirs
+        )
         if not allowed:
             raise PermissionError(f"禁止访问该目录: {folder_path}，请先加入 ALLOWED_BASE_DIRS")
 

@@ -114,12 +114,13 @@ async def import_folder(
 ):
     """
     批量导入文件夹。参数传递方式：JSON body {"folder": "D:/notes"}。
-    校验文件夹路径在 ALLOWED_BASE_DIRS 范围内。
+    校验文件夹路径在 ALLOWED_BASE_DIRS 范围内（原硬编码已收敛到 config.rag.file.allowed_base_dirs）。
     """
     folder_path = Path(folder)
-    from langchain_lab.core.config._config import ALLOWED_BASE_DIRS
-
-    allowed = any(folder_path.resolve() == base.resolve() or folder_path.resolve().is_relative_to(base.resolve()) for base in ALLOWED_BASE_DIRS)
+    allowed = any(
+        folder_path.resolve() == base.resolve() or folder_path.resolve().is_relative_to(base.resolve())
+        for base in config.rag.file.allowed_base_dirs
+    )
     if not allowed:
         raise HTTPException(status_code=403, detail=f"禁止访问该目录: {folder_path}")
 
