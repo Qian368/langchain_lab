@@ -1,7 +1,7 @@
 """实验9：事件驱动 Agent 运行时入口（独立运行时，不动 exp3）
 
 - 组装：配置注入 session_ctx / LLM / 全量工具 / EventBus / TerminalView / SessionStore / 压缩器
-- 会话选择：列出已有（恢复）或新建（uuid4）
+- 会话选择：列出已有（恢复）或新建（uuid4）；支持 :branch/:branches/:switch 分支命令
 - 压缩：按 config/runtime.yaml 的 compression 配置构建 SessionCompressor（可选）
 - ChatSession 只做消息会话；MCP 连接 clear_all() 在此 finally（服务停机语义）
 """
@@ -89,6 +89,7 @@ async def main() -> None:
         system_prompt=system_prompt,
     )
     view.bind(bus, session_id)
+    view.info("提示：可用分支命令  :branch <N>（从第N条对话分叉）/ :branches / :switch <branch_id>")
 
     try:
         await chat.resume()  # 恢复历史（含摘要）
