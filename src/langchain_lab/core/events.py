@@ -1,4 +1,13 @@
-"""事件模型：事件类型枚举 + 统一事件载体（两级粒度：过程事件给展示，完整事件给持久化）"""
+"""事件模型：事件类型枚举 + 统一事件载体（面向网络服务化）
+
+事件分级：
+- 输入驱动：外部适配器 publish，会话订阅触发一轮（USER_MESSAGE_SUBMITTED）
+- 会话生命周期：SESSION_*（创建/恢复/关闭/系统提示）
+- 轮次边界：AGENT_TURN_START / DONE（一次输入的处理开始/结束，供驱动等待+前端进度）
+- 过程事件：逐片/即时，给展示（流式打字、工具进度、用户回显）
+- 状态快照：SESSION_STATE_UPDATED 带完整消息快照（事件溯源，持久化订阅者落库）
+- 压缩 / 错误：归档提示与运行时异常
+"""
 from dataclasses import dataclass, field
 from enum import StrEnum
 from time import time
@@ -6,21 +15,32 @@ from typing import Any
 
 
 class EventType(StrEnum):
-    """全部事件类型。过程事件（给展示）与完整事件（给持久化）都在这"""
+    """全部事件类型"""
 
+    # —— 输入驱动（网络服务化：输入适配器发布，会话订阅触发一轮）——
+    USER_MESSAGE_SUBMITTED = "user_message_submitted"
     # —— 会话生命周期 ——
     SESSION_CREATED = "session_created"
+    SESSION_RESUMED = "session_resumed"
     SESSION_CLOSED = "session_closed"
+    SESSION_NOTICE = "session_notice"  # 会话内系统提示（分支提示等），展示层渲染
+    # —— 轮次边界（一次 USER_MESSAGE 的处理开始/结束）——
+    AGENT_TURN_START = "agent_turn_start"
+    AGENT_TURN_DONE = "agent_turn_done"
     # —— 过程事件：逐片/即时，给展示（流式打字、工具进度）——
-    HUMAN_MESSAGE_RECEIVED = "human_message_received"
+    HUMAN_MESSAGE_RECEIVED = "human_message_received"  # 会话追加用户消息后的回显
     STREAM_CHUNK = "stream_chunk"
     TOOL_CALL_START = "tool_call_start"
     TOOL_RESULT = "tool_result"
-    # —— 完整事件：累积完成，给持久化（落库）——
+    # —— 完整事件：累积完成，给持久化/完整语义 ——
     ASSISTANT_MESSAGE_EMITTED = "assistant_message_emitted"
     TURN_COMPLETE = "turn_complete"
-    # —— 上下文压缩：早期轮归档为摘要（持久化更新 summary + 展示提示）——
+    # —— 状态快照（事件溯源核心：会话每轮发布完整快照，持久化订阅者落库）——
+    SESSION_STATE_UPDATED = "session_state_updated"
+    # —— 上下文压缩：早期轮归档为摘要 ——
     CONTEXT_COMPRESSED = "context_compressed"
+    # —— 错误（运行时异常 publish，日志/前端/持久化处理）——
+    ERROR_OCCURRED = "error_occurred"
 
 
 @dataclass(slots=True)
