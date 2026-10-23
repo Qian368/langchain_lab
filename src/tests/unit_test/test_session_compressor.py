@@ -1,4 +1,4 @@
-"""SessionCompressor 单测：轮次切分 / 摘要生成 / 双视图投影（不连真实 LLM）"""
+"""SessionCompressor 单测：轮次切分 / 摘要生成 / 双视图投影 / 手动提前压缩（不连真实 LLM）"""
 import asyncio
 from types import SimpleNamespace
 
@@ -51,6 +51,26 @@ def test_maybe_compress_generates_summary_and_event():
     summary = asyncio.run(comp.maybe_compress(_msgs_with_turns(8), None))
     assert summary == "压缩摘要"
     assert seen and seen[0]["compressed_turns"] == 6  # 8 轮 - 保留 2 轮 = 压缩 6 轮
+    assert seen[0]["forced"] is False  # 自动压缩
+
+
+def test_force_compress_early():
+    """手动提前压缩：force=True 且 keep 更小 → 未到阈值也压缩"""
+    bus = EventBus()
+    seen = []
+    bus.subscribe(EventType.CONTEXT_COMPRESSED, lambda e: seen.append(e.payload))
+    comp = SessionCompressor(_FakeLlm(), keep_recent_turns=6, bus=bus, session_id="s1")
+
+    summary = asyncio.run(comp.maybe_compress(_msgs_with_turns(4), None, force=True, keep_turns=2))
+    assert summary == "压缩摘要"
+    assert seen[0]["compressed_turns"] == 2  # 4 轮保留最近 2 轮，压前 2 轮
+    assert seen[0]["forced"] is True  # 手动触发标记，前端可感知
+
+
+def test_force_compress_no_early_returns_none():
+    """force 但消息不足保留数 → 无可压早期轮返回 None"""
+    comp = SessionCompressor(_FakeLlm(), keep_recent_turns=6, bus=EventBus(), session_id="s1")
+    assert asyncio.run(comp.maybe_compress(_msgs_with_turns(2), None, force=True)) is None
 
 
 def test_build_llm_context_with_summary():
