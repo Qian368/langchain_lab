@@ -12,6 +12,7 @@ from langchain_lab.core.config.app_config import AppConfig
 from langchain_lab.core.config.app_schema.mcp_models import MCPSettings
 from langchain_lab.core.config.app_schema.project_models import ProjectSettings
 from langchain_lab.core.config.app_schema.rag_models import RagSettings
+from langchain_lab.core.config.app_schema.runtime_models import RuntimeSettings
 from langchain_lab.core.llm.llm_schema import LLMConfig
 
 
@@ -22,6 +23,7 @@ class ConfigLoader(BaseSettings):
             "config/project.yaml",
             "config/mcp.yaml",
             "config/llm.yaml",
+            "config/runtime.yaml",
         ],
         env_file=".env",
         env_nested_delimiter="__",
@@ -32,6 +34,7 @@ class ConfigLoader(BaseSettings):
     rag: RagSettings = Field(default_factory=RagSettings)
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
     @classmethod
     def settings_customise_sources(
@@ -78,4 +81,5 @@ def load_config() -> AppConfig:
         rag=config.rag,
         mcp=config.mcp,
         llm=config.llm,
+        runtime=config.runtime,
     )
