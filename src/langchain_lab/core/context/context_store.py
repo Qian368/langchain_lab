@@ -1,7 +1,7 @@
 """ContextStore：会话上下文持久化（订阅者模式，事件溯源）
 
-- 会话不引用本 store：会话每轮发布 SESSION_STATE_UPDATED（完整可序列化快照），
-  本订阅者收到后落库；SESSION_CLOSED 标记会话关闭并兜底落库。
+- 会话不引用本 store：订阅 SESSION_STATE_UPDATED（完整可序列化快照）落库；
+  SESSION_CLOSED 标记关闭；CONTEXT_COMPRESSED 立即落库新摘要（不等下轮快照）。
 - 入口用它加载历史（load_branch / load_summary）注入会话，并实现分支操作回调。
 - 公开 save/load 仅供入口写库与测试；运行时持久化一律走订阅者（事件即真相）。
 - schema 面向 SaaS 检索 / 压缩归档 / 会话分支 预留。
@@ -65,9 +65,10 @@ class ContextStore:
 
     # ===================== 订阅者 =====================
     def subscribe_to_bus(self, bus: EventBus) -> None:
-        """注册为持久化订阅者：状态快照落库 + 会话关闭标记"""
+        """注册为持久化订阅者：状态快照落库 + 会话关闭标记 + 压缩结果立即落库摘要"""
         bus.subscribe(EventType.SESSION_STATE_UPDATED, self._on_state_updated)
         bus.subscribe(EventType.SESSION_CLOSED, self._on_session_closed)
+        bus.subscribe(EventType.CONTEXT_COMPRESSED, self._on_compressed)
 
     async def _on_state_updated(self, event: Event) -> None:
         """async handler：快照落库（不阻塞事件循环）"""
@@ -88,6 +89,17 @@ class ContextStore:
         """标记会话关闭（轻量，同步即可）"""
         with sqlite3.connect(self._db_path) as conn:
             conn.execute("UPDATE sessions SET status='closed' WHERE session_id=?", (event.session_id,))
+
+    def _on_compressed(self, event: Event) -> None:
+        """压缩完成立即落库新摘要（不等下轮状态快照，手动提前压缩也能即时持久化）"""
+        summary = (event.payload or {}).get("summary")
+        if not summary:
+            return
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "UPDATE sessions SET summary=?, updated_at=? WHERE session_id=?",
+                (summary, time.time(), event.session_id),
+            )
 
     # ===================== 保存（公开，供入口写库与测试；运行时持久化走订阅者） =====================
     async def save(

@@ -1,9 +1,10 @@
-"""上下文压缩：LLM 摘要生成 + 双视图投影委托（运行时调用）
+"""上下文压缩：LLM 摘要生成 + 双视图投影委托（事件化：触发与结果解耦）
 
 - 数据模型保留全量，双视图是投影（规范 7.2，委托 views 纯函数）
 - 摘要存会话级 sessions.summary（各分支共享，规范 7.1）
-- 压缩超阈值时发布 CONTEXT_COMPRESSED（展示归档提示 + 持久化更新 summary）
-- R1/R3：每会话一个实例，依赖全部构造注入
+- 触发：COMPRESS_REQUESTED（force=False 自动 / force=True 前端手动提前，可 keep 覆盖保留轮数）
+- 结果：发布 CONTEXT_COMPRESSED（summary + compressed_turns + forced），前端可感知手动/自动
+- 压缩由 ChatSession 后置触发（不阻塞主对话），本组件只负责生成摘要 + 发结果事件
 """
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
@@ -13,7 +14,7 @@ from langchain_lab.core.events import Event, EventType
 
 
 class SessionCompressor:
-    """会话上下文压缩器（每会话实例，投影策略由运行时调用）"""
+    """会话上下文压缩器（每会话实例，投影策略由运行时调用/事件驱动）"""
 
     def __init__(
         self,
@@ -33,19 +34,36 @@ class SessionCompressor:
 
     # ---------- 压缩 ----------
     async def maybe_compress(
-        self, messages: list[BaseMessage], prev_summary: str | None
+        self,
+        messages: list[BaseMessage],
+        prev_summary: str | None,
+        force: bool = False,
+        keep_turns: int | None = None,
     ) -> str | None:
-        """超阈值则压缩早期轮生成摘要，返回新 summary；未超返回 None"""
+        """生成摘要，返回新 summary；无可压早期轮返回 None
+
+        - force=False：自动，turns 超过 keep_recent_turns 才压
+        - force=True ：前端手动提前，跳过阈值判断（可用 keep_turns 覆盖保留轮数，真正提前压）
+        - early = turns[:-keep]，保留最近 keep 轮（默认 keep_recent_turns）
+        """
         turns = self.split_turns(messages)
-        if len(turns) <= self._keep_recent_turns:
-            return None
-        early_turns = turns[: -self._keep_recent_turns]
+        keep = keep_turns if keep_turns is not None else self._keep_recent_turns
+        keep = max(keep, 1)
+        early_turns = turns[:-keep]
+        if not early_turns:
+            return None  # 没有早期轮可压（消息不足保留数）
+        if not force and len(turns) <= self._keep_recent_turns:
+            return None  # 自动模式：未超阈值不压
         new_summary = await self._summarize(early_turns, prev_summary)
         self._bus.publish(
             Event(
                 type=EventType.CONTEXT_COMPRESSED,
                 session_id=self._session_id,
-                payload={"summary": new_summary, "compressed_turns": len(early_turns)},
+                payload={
+                    "summary": new_summary,
+                    "compressed_turns": len(early_turns),
+                    "forced": force,
+                },
             )
         )
         return new_summary
