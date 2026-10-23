@@ -40,7 +40,7 @@ class ChatSession:
         llm,
         view,  # TerminalView：提供 prompt_async 输入 + 订阅事件渲染（duck-typing）
         tools: list[BaseTool],  # 全量工具集（入口构建后注入）
-        store=None,  # SessionStore：可选，订阅完整事件落库（duck-typing）
+        store=None,  # SessionStore：可选，持久化（每轮 save + close 兜底）
         system_prompt: str = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务",
     ):
         self._session_id = session_id
@@ -76,12 +76,16 @@ class ChatSession:
 
             await self._agent_loop(llm_with_tools=llm_with_tools)
 
+            # 每轮结束落库（崩溃安全）；持久化归 store，MCP 连接归 MCPSessionManager
+            if self._store is not None:
+                await self._store.save(self._session_id, self._messages, session_ctx=self._session_ctx)
+
     async def close(self) -> None:
-        """会话关闭：保证落库（flush 等后台写库）+ 保存 + 事件。不碰 MCP 连接（见模块 docstring）"""
+        """会话关闭：保证落库（flush 等后台写库）+ 保存兜底 + 事件。不碰 MCP 连接（见模块 docstring）"""
         self._emit(EventType.SESSION_CLOSED)
-        await self._bus.flush()  # 等后台 async handler（持久化写库）完成
+        await self._bus.flush()  # 等后台 async handler（若有）完成
         if self._store is not None:
-            await self._store.save(self._session_id, self._messages)
+            await self._store.save(self._session_id, self._messages, session_ctx=self._session_ctx)
 
     # —— 内部 ——
     def _emit(self, event_type: EventType, payload=None) -> None:
