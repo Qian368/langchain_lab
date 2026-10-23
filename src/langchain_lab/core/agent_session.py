@@ -1,11 +1,12 @@
 """ChatSession：事件驱动的 Agent 会话（事件源，一个会话一个实例）
 
 - 搬自 exp3_multi_chat 的循环逻辑，业务/展示/状态解耦：
-  - 业务累积留在实例（_messages）
+  - 业务累积留在实例（_messages 全量，压缩后不删）
   - 展示全部 emit 事件，由订阅者（TerminalView 等）渲染
   - 输入交互通过注入的 view.prompt_async()（交互层归 view）
-- 不碰 MCP 连接：MCP 连接生命周期归 MCPSessionManager（TTL/LRU/巡检），
-  clear_all() 属于服务停机语义，由运行时入口 finally 调用。
+- 压缩（可选）：SessionCompressor 注入，LLM 视图 = 摘要置顶 + 最近 N 轮（_llm_messages），
+  _messages 保持全量供持久化/前端折叠
+- 不碰 MCP 连接：MCP 连接生命周期归 MCPSessionManager，clear_all() 由运行时入口 finally 调用
 """
 import json
 from typing import cast
@@ -22,6 +23,7 @@ from langchain.tools import BaseTool
 
 from langchain_lab.core.event_bus import EventBus
 from langchain_lab.core.events import Event, EventType
+from langchain_lab.core.session_compressor import SessionCompressor
 from langchain_lab.core.tools.tool_disclosure import get_disclosure_tools
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
 
@@ -41,6 +43,7 @@ class ChatSession:
         view,  # TerminalView：提供 prompt_async 输入 + 订阅事件渲染（duck-typing）
         tools: list[BaseTool],  # 全量工具集（入口构建后注入）
         store=None,  # SessionStore：可选，持久化（每轮 save + close 兜底）
+        compressor: SessionCompressor | None = None,  # 可选，上下文压缩
         system_prompt: str = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务",
     ):
         self._session_id = session_id
@@ -50,7 +53,9 @@ class ChatSession:
         self._view = view
         self._tools = tools
         self._store = store
+        self._compressor = compressor
         self._messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
+        self._summary: str | None = None  # 会话级压缩摘要（存 sessions.summary）
 
     # —— 生命周期 ——
     async def resume(self) -> None:
@@ -59,6 +64,7 @@ class ChatSession:
             restored = await self._store.load(self._session_id)
             if restored is not None:
                 self._messages = restored
+                self._summary = await self._store.load_summary(self._session_id)
 
     async def run(self) -> None:
         """主循环：输入 → 披露工具 → Agent 循环（搬 exp3 main + _single_chat_loop）"""
@@ -76,18 +82,35 @@ class ChatSession:
 
             await self._agent_loop(llm_with_tools=llm_with_tools)
 
-            # 每轮结束落库（崩溃安全）；持久化归 store，MCP 连接归 MCPSessionManager
+            # 压缩检查：超阈值则把早期轮压缩进摘要（LLM 视图 = 摘要 + 最近 N 轮）
+            if self._compressor is not None:
+                new_summary = await self._compressor.maybe_compress(self._messages, self._summary)
+                if new_summary is not None:
+                    self._summary = new_summary
+
+            # 每轮结束落库（崩溃安全，带摘要）；持久化归 store，MCP 连接归 MCPSessionManager
             if self._store is not None:
-                await self._store.save(self._session_id, self._messages, session_ctx=self._session_ctx)
+                await self._store.save(
+                    self._session_id, self._messages, session_ctx=self._session_ctx, summary=self._summary
+                )
 
     async def close(self) -> None:
-        """会话关闭：保证落库（flush 等后台写库）+ 保存兜底 + 事件。不碰 MCP 连接（见模块 docstring）"""
+        """会话关闭：保证落库（flush 等后台写库）+ 保存兜底 + 事件。不碰 MCP 连接"""
         self._emit(EventType.SESSION_CLOSED)
         await self._bus.flush()  # 等后台 async handler（若有）完成
         if self._store is not None:
-            await self._store.save(self._session_id, self._messages, session_ctx=self._session_ctx)
+            await self._store.save(
+                self._session_id, self._messages, session_ctx=self._session_ctx, summary=self._summary
+            )
 
     # —— 内部 ——
+    @property
+    def _llm_messages(self) -> list[BaseMessage]:
+        """LLM 视图：压缩后 = 摘要置顶 + 最近 N 轮真实消息；未压缩 = 全量（规范 7.2）"""
+        if self._compressor is not None and self._summary:
+            return self._compressor.build_llm_context(self._messages, self._summary)
+        return self._messages
+
     def _emit(self, event_type: EventType, payload=None) -> None:
         """统一发布事件，session_id 自动填充（多会话隔离基础）"""
         self._bus.publish(Event(type=event_type, session_id=self._session_id, payload=payload))
@@ -113,7 +136,8 @@ class ChatSession:
                     additional_kwargs={"meta": "tool_call_break"},
                 )
 
-            current_messages = self._messages.copy()
+            # 基底用 LLM 视图（压缩后含摘要+最近轮），上限注入加在副本
+            current_messages = self._llm_messages.copy()
             if injected_llm_limit_msg is not None:
                 current_messages.append(injected_llm_limit_msg)
             if injected_tool_limit_msg is not None:
