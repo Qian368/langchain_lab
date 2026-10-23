@@ -3,6 +3,7 @@
 - 组装：配置注入 session_ctx / LLM / 全量工具 / EventBus / TerminalView / SessionStore / 压缩器
 - 会话选择：列出已有（恢复）或新建（uuid4）；支持 :branch/:branches/:switch 分支命令
 - 压缩：按 config/runtime.yaml 的 compression 配置构建 SessionCompressor（可选）
+- 运行上限 / 会话库路径 / 默认系统提示词：按 config/runtime.yaml 的 agent 配置注入
 - ChatSession 只做消息会话；MCP 连接 clear_all() 在此 finally（服务停机语义）
 """
 import asyncio
@@ -18,9 +19,6 @@ from langchain_lab.core.tools.tool_disclosure import get_init_tools
 from langchain_lab.core.llm.llm import build_llm, get_llm
 from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
 from langchain_lab.util.prompt_style import Printer
-
-DEFAULT_DB_PATH = "data/sessions.db"
-DEFAULT_SYSTEM_PROMPT = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务"
 
 
 async def _pick_session(printer: Printer, view: TerminalView, store: SessionStore, session_ctx: dict) -> str:
@@ -57,6 +55,9 @@ def _build_compressor(bus: EventBus, session_id: str) -> SessionCompressor | Non
 
 
 async def main() -> None:
+    # 0. 运行时 agent 配置（上限/库路径/默认提示词，原硬编码已收敛）
+    agent_cfg = get_config().runtime.agent
+
     # 1. 组装（全部构造注入，无模块级全局单例依赖）
     session_ctx = get_config().project.session_ctx
     printer = Printer()
@@ -67,13 +68,13 @@ async def main() -> None:
 
     bus = EventBus()
     view = TerminalView()
-    store = SessionStore(db_path=DEFAULT_DB_PATH)
+    store = SessionStore(db_path=str(agent_cfg.session_db_path))
 
     # 2. 会话选择：恢复 or 新建
     session_id = await _pick_session(printer, view, store, session_ctx)
 
-    # 3. system prompt（可回车跳过默认）
-    system_prompt = (await view.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")) or DEFAULT_SYSTEM_PROMPT
+    # 3. system prompt（可回车跳过默认，默认值来自 runtime.yaml）
+    system_prompt = (await view.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")) or agent_cfg.default_system_prompt
 
     # 4. 组装 ChatSession + 压缩器 + 绑定订阅者
     compressor = _build_compressor(bus, session_id)
@@ -87,6 +88,8 @@ async def main() -> None:
         store=store,
         compressor=compressor,
         system_prompt=system_prompt,
+        max_llm_loop=agent_cfg.max_llm_loop,
+        max_tool_calls=agent_cfg.max_tool_calls,
     )
     view.bind(bus, session_id)
     view.info("提示：可用分支命令  :branch <N>（从第N条对话分叉）/ :branches / :switch <branch_id>")

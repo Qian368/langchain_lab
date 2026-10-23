@@ -7,6 +7,7 @@
 - 压缩（可选）：SessionCompressor 注入，LLM 视图 = 摘要置顶 + 最近 N 轮（_llm_messages），
   _messages 保持全量供持久化/前端折叠
 - 分支：branch_id 实例状态；:branch/:branches/:switch 命令；快照式存储
+- 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入，不再硬编码
 - 不碰 MCP 连接：MCP 连接生命周期归 MCPSessionManager，clear_all() 由运行时入口 finally 调用
 """
 import json
@@ -28,9 +29,6 @@ from langchain_lab.core.session_compressor import SessionCompressor
 from langchain_lab.core.tools.tool_disclosure import get_disclosure_tools
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
 
-MAX_LLM_LOOP = 3
-MAX_TOOL_CALLS = 4
-
 
 class ChatSession:
     """独立会话实例 = 天然隔离；并发多会话互不污染（R1/R3：依赖全部构造注入，无全局单例）"""
@@ -47,6 +45,8 @@ class ChatSession:
         compressor: SessionCompressor | None = None,  # 可选，上下文压缩
         branch_id: str = "root",  # 当前分支
         system_prompt: str = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务",
+        max_llm_loop: int = 3,  # 单轮 LLM 最大迭代（入口按 runtime.yaml 注入，不再硬编码）
+        max_tool_calls: int = 4,  # 单轮最大工具调用（入口按 runtime.yaml 注入，不再硬编码）
     ):
         self._session_id = session_id
         self._session_ctx = session_ctx
@@ -57,6 +57,8 @@ class ChatSession:
         self._store = store
         self._compressor = compressor
         self._branch_id = branch_id
+        self._max_llm_loop = max_llm_loop
+        self._max_tool_calls = max_tool_calls
         self._messages: list[BaseMessage] = [SystemMessage(content=system_prompt)]
         self._summary: str | None = None  # 会话级压缩摘要（存 sessions.summary）
 
@@ -196,12 +198,12 @@ class ChatSession:
             injected_llm_limit_msg: SystemMessage | None = None
             injected_tool_limit_msg: SystemMessage | None = None
 
-            if llm_loop_count >= MAX_LLM_LOOP:  # 先判断，再自增，用 >=
+            if llm_loop_count >= self._max_llm_loop:  # 先判断，再自增，用 >=
                 injected_llm_limit_msg = SystemMessage(
                     content="本轮对话已到达最大Agent轮次上限，请基于现有全部信息直接给出最终答案，禁止调用任何工具。",
                     additional_kwargs={"meta": "llm_loop_break"},
                 )
-            if tool_call_count >= MAX_TOOL_CALLS:  # 先判断，再自增，用 >=
+            if tool_call_count >= self._max_tool_calls:  # 先判断，再自增，用 >=
                 injected_tool_limit_msg = SystemMessage(
                     content="本轮对话工具调用次数已耗尽，不再执行后续工具，请基于已获得的工具结果总结回答，禁止继续调用工具",
                     additional_kwargs={"meta": "tool_call_break"},
@@ -232,13 +234,13 @@ class ChatSession:
             self._emit(EventType.ASSISTANT_MESSAGE_EMITTED, payload=full_chunk)
 
             # —— 上限终止：LLM 收尾轮多一次自增，工具计数顶格停在上限 ——
-            if llm_loop_count > MAX_LLM_LOOP or tool_call_count >= MAX_TOOL_CALLS:
+            if llm_loop_count > self._max_llm_loop or tool_call_count >= self._max_tool_calls:
                 break
 
             # —— 需要调用工具：逐个执行，拼 ToolMessage；完成后回到循环顶部再带工具调 LLM ——
             if full_chunk.tool_calls:
                 for i, tc in enumerate(full_chunk.tool_calls, 1):
-                    if tool_call_count >= MAX_TOOL_CALLS:
+                    if tool_call_count >= self._max_tool_calls:
                         break
                     tool_call_count += 1
                     self._emit(
