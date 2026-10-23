@@ -59,29 +59,36 @@ class SessionStore:
         session_ctx: dict | None = None,
         title: str | None = None,
         branch_id: str = "root",
+        summary: str | None = None,
     ) -> None:
         """整轮/整会话落库（重写该分支消息）。async 包装，不阻塞事件循环"""
-        await asyncio.to_thread(self._save_sync, session_id, messages, session_ctx, title, branch_id)
+        await asyncio.to_thread(
+            self._save_sync, session_id, messages, session_ctx, title, branch_id, summary
+        )
 
-    def _save_sync(self, session_id, messages, session_ctx, title, branch_id) -> None:
+    def _save_sync(self, session_id, messages, session_ctx, title, branch_id, summary) -> None:
         now = time.time()
         dicts = messages_to_dict(messages)
         user_id = (session_ctx or {}).get("user_id", "")
         tenant_id = (session_ctx or {}).get("tenant_id", "")
         title = title or ""
+        summary = summary or ""
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(
                 """INSERT INTO sessions(session_id, user_id, tenant_id, title, summary, status, created_at, updated_at)
-                   VALUES(?,?,?,?,'','active',?,?)
+                   VALUES(?,?,?,?,?,'active',?,?)
                    ON CONFLICT(session_id) DO UPDATE SET
                      user_id=excluded.user_id,
                      tenant_id=excluded.tenant_id,
                      title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE sessions.title END,
+                     summary=CASE WHEN excluded.summary<>'' THEN excluded.summary ELSE sessions.summary END,
                      updated_at=excluded.updated_at""",
-                (session_id, user_id, tenant_id, title, now, now),
+                (session_id, user_id, tenant_id, title, summary, now, now),
             )
             # 整轮重写：清掉该分支旧消息，按序重插（seq 递增，turn_id 暂置 0）
-            conn.execute("DELETE FROM messages WHERE session_id=? AND branch_id=?", (session_id, branch_id))
+            conn.execute(
+                "DELETE FROM messages WHERE session_id=? AND branch_id=?", (session_id, branch_id)
+            )
             conn.executemany(
                 "INSERT INTO messages(session_id, branch_id, seq, turn_id, role, payload, archived) VALUES(?,?,?,?,?,?,0)",
                 [
@@ -97,7 +104,9 @@ class SessionStore:
 
     def _load_sync(self, session_id, branch_id):
         with sqlite3.connect(self._db_path) as conn:
-            exists = conn.execute("SELECT 1 FROM sessions WHERE session_id=?", (session_id,)).fetchone()
+            exists = conn.execute(
+                "SELECT 1 FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
             if exists is None:
                 return None
             rows = conn.execute(
@@ -107,6 +116,20 @@ class SessionStore:
         if not rows:
             return []
         return messages_from_dict([json.loads(r[0]) for r in rows])
+
+    # —— 压缩摘要 ——
+    async def load_summary(self, session_id: str) -> str | None:
+        """读会话级压缩摘要；无会话或摘要为空返回 None"""
+        return await asyncio.to_thread(self._load_summary_sync, session_id)
+
+    def _load_summary_sync(self, session_id):
+        with sqlite3.connect(self._db_path) as conn:
+            row = conn.execute(
+                "SELECT summary FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        if row is None or not row[0]:
+            return None
+        return row[0]
 
     # —— 列出（SaaS 检索预留）——
     async def list_sessions(self, user_id: str, tenant_id: str) -> list[dict]:
