@@ -1,13 +1,12 @@
-"""上下文压缩：LLM 摘要生成 + 双视图投影委托（事件化：触发与结果解耦）
+"""上下文压缩：LLM 摘要生成 + 视图重建（事件化：触发与结果解耦）
 
-- 数据模型保留全量，双视图是投影（规范 7.2，委托 views 纯函数）
-- 摘要存会话级 sessions.summary（各分支共享，规范 7.1）
+- 压缩只做两件事：① 生成摘要 ② 触发方(ChatSession)重建 _messages = System+Human摘要+最近 keep 轮
+  早期轮从视图移出——它们已由每轮 MESSAGES_ARCHIVED 增量归档，全量历史可重建
 - 触发：COMPRESS_REQUESTED（force=False 自动 / force=True 前端手动提前，可 keep 覆盖保留轮数）
 - 结果：发布 CONTEXT_COMPRESSED（summary + compressed_turns + forced），前端可感知手动/自动
-- 压缩由 ChatSession 后置触发（不阻塞主对话），本组件只负责生成摘要 + 发结果事件
-- 【KV 前缀一致性】压缩请求 = LLM 视图去掉最近 keep 轮后【原封不动】（保留 system/摘要/各角色，
-  不过滤不重排）+ 尾部追加一条固定 HumanMessage 压缩指令；与主对话历史前缀一致，可命中前置 KV 缓存
-- 摘要消息角色：HumanMessage（additional_kwargs.meta=summary），固定视图第 2 条；只拼一条、迭代覆盖，不堆叠
+- 【KV 前缀一致性】压缩请求 = 当前视图(累积 _messages)去掉最近 keep 轮【原封不动】+ 追加固定 HumanMessage
+  压缩指令；与主对话历史前缀一致，可命中前置 KV 缓存
+- 摘要消息角色：HumanMessage（additional_kwargs.meta=summary），固定视图第 2 条；只拼一条、迭代覆盖
 - 压缩指令文本由 runtime.yaml compression.summarize_prompt 配置注入（None 用内置默认）
 """
 from langchain_core.messages import BaseMessage, HumanMessage
@@ -23,7 +22,7 @@ _DEFAULT_SUMMARIZE_PROMPT = (
 
 
 class SessionCompressor:
-    """会话上下文压缩器（每会话实例，投影策略由运行时调用/事件驱动）"""
+    """会话上下文压缩器（每会话实例；输入=当前累积视图 _messages，由 ChatSession 传入）"""
 
     def __init__(
         self,
@@ -53,18 +52,19 @@ class SessionCompressor:
     ) -> str | None:
         """生成摘要，返回新 summary；无可压早期轮返回 None
 
-        - force=False：自动，turns 超过 keep_recent_turns 才压
+        - messages：当前累积视图（ChatSession 传入；含旧摘要消息则先被 split_turns 跳过）
+        - force=False：自动，视图轮数超过 keep_recent_turns 才压
         - force=True ：前端手动提前，跳过阈值判断（可用 keep_turns 覆盖保留轮数，真正提前压）
-        - 压缩输入 = 视图去掉最近 keep 轮原封不动 + 追加固定压缩指令（KV 前缀一致）
+        - 压缩请求 = 当前视图去掉最近 keep 轮原封不动 + 追加固定压缩指令（KV 前缀一致）
+        - 只返回摘要；视图重建由 ChatSession 调用 build_llm_context 完成
         """
         if self._summarize_llm is None:
             return None
         keep = max(keep_turns if keep_turns is not None else self._keep_recent_turns, 1)
-        view = self.build_llm_context(messages, prev_summary)
-        request, early_turns = self.build_compress_input(view, keep)
+        request, early_turns = self.build_compress_input(messages, keep)
         if request is None:
-            return None  # 没有早期轮可压（消息不足保留数）
-        if not force and len(split_turns(view)) <= self._keep_recent_turns:
+            return None  # 没有早期轮可压（视图消息不足保留数）
+        if not force and len(self.split_turns(messages)) <= self._keep_recent_turns:
             return None  # 自动模式：未超阈值不压
         new_summary = await self._summarize(request)
         self._bus.publish(
@@ -83,7 +83,7 @@ class SessionCompressor:
     def build_compress_input(
         self, view_messages: list[BaseMessage], keep_turns: int
     ) -> tuple[list[BaseMessage] | None, int]:
-        """压缩请求 = 视图去掉最近 keep 轮（原封不动）+ 追加固定 Human 压缩指令
+        """压缩请求 = 当前视图去掉最近 keep 轮（原封不动）+ 追加固定 Human 压缩指令
 
         返回 (request, early_turns)；无可压早期轮返回 (None, 0)
         - view 结构：System + [Human摘要, meta=summary] + 轮*N
@@ -105,10 +105,11 @@ class SessionCompressor:
         resp = await self._summarize_llm.ainvoke(request)
         return resp.content.strip()
 
-    # ---------- 双视图投影（委托 views，keep_recent_turns 注入） ----------
+    # ---------- 视图重建（压缩后 ChatSession 调用，改写 _messages） ----------
     def build_llm_context(
         self, messages: list[BaseMessage], summary: str | None
     ) -> list[BaseMessage]:
+        """重建视图 = System + Human摘要 + 最近 keep 轮（早期轮移出，已由归档表保存）"""
         return build_llm_context(messages, summary, self._keep_recent_turns)
 
     def build_display_context(
