@@ -113,6 +113,7 @@ def test_turn_archives_new_messages():
 
 
 def test_session_command_branch_create():
+    """分支创建：branch_creator 返回 (new_id, 拐点视图)，ChatSession 直接设为新分支 _messages"""
     async def scenario():
         bus = EventBus()
         created = []
@@ -120,7 +121,7 @@ def test_session_command_branch_create():
         async def fake_creator(parent, point):
             bid = f"b_{point}"
             created.append(bid)
-            return bid
+            return bid, [SystemMessage(content="sys"), HumanMessage(content="h0"), AIMessage(content="a0")]
 
         chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=None, tools=[], history=_history(3), branch_creator=fake_creator)
         bus.publish(Event(EventType.SESSION_COMMAND, "s1", {"action": "branch_create", "point": 2}))
