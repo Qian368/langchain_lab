@@ -1,14 +1,15 @@
 """实验9：事件驱动 Agent 运行时入口（消息总线化，面向网络服务化，不动 exp3）
 
-架构边界（事件驱动 / 订阅者化 / 解析前移）：
+架构边界（事件驱动 / 订阅者化 / 解析前移 / 单一真相源）：
 - 输入事件化：终端适配器读输入 → 【适配器层解析+校验】→ 转事件（指令或普通消息）→ publish → ChatSession 订阅响应
 - 指令解析不放在运行时：适配器把 :branch/:branches/:switch/:compress 分类校验后转为
   SESSION_COMMAND / COMPRESS_REQUESTED 事件，普通输入转 USER_MESSAGE_SUBMITTED
 - 输出事件化：ChatSession 发布 STREAM/TOOL/ASSISTANT/SESSION 等事件
-- 持久化订阅者：ContextStore.subscribe_to_bus 订阅状态快照/压缩结果落库（事件即真相）
+- 持久化订阅者：ContextStore.subscribe_to_bus 订阅增量归档/压缩结果落库（archive 单一真相源，事件即真相）
 - 展示订阅者：终端渲染订阅者【内联本入口】（不复用独立 view 模块，exp9 即展示层）
-- 恢复：入口从 ContextStore 加载 history/summary 注入 ChatSession；运行时不碰数据库
-- 分支回调：入口用 ContextStore 实现 branch_loader/lister/creator 注入会话
+- 恢复：入口用 store.load_view 从 archive+summary+system_prompt 构建 llm 视图注入 ChatSession（KV 逐 token 一致），
+  运行时不碰数据库
+- 分支回调：store.create_branch 返回 (new_id, 拐点视图)（从 archive 构建，支持压缩后从历史轮次分叉）
 - 运行上限/库路径/默认提示词：按 config/runtime.yaml agent 配置注入
 - MCP 连接 clear_all() 在此 finally（服务停机语义，不放在 ChatSession 内）
 """
@@ -162,8 +163,10 @@ class _TerminalRenderer:
 
 
 async def _pick_session(
-    printer: Printer, renderer: _TerminalRenderer, store: ContextStore, session_ctx: dict
+    printer: Printer, renderer: _TerminalRenderer, store: ContextStore, session_ctx: dict,
+    keep_recent_turns: int,
 ) -> tuple[str, str, list | None, str | None]:
+    """选会话：列出已有会话，编号恢复（从 archive 构建视图）或新建；返回 (session_id, branch_id, history, summary)"""
     sessions = await store.list_sessions(
         session_ctx.get("user_id", ""), session_ctx.get("tenant_id", "")
     )
@@ -176,7 +179,7 @@ async def _pick_session(
             idx = int(choice)
             if 1 <= idx <= len(sessions):
                 sid = sessions[idx - 1]["session_id"]
-                history = await store.load_branch(sid, "root")
+                history = await store.load_view(sid, "root", keep_recent_turns)  # 从 archive 构建 llm 视图
                 summary = await store.load_summary(sid)
                 return sid, "root", history, summary
     return str(uuid.uuid4()), "root", None, None
@@ -203,6 +206,7 @@ def _build_compressor(bus: EventBus, session_id: str) -> SessionCompressor | Non
 async def main() -> None:
     agent_cfg = get_config().runtime.agent
     session_ctx = get_config().project.session_ctx
+    keep_recent_turns = get_config().runtime.compression.keep_recent_turns
     printer = Printer()
     printer.reset_all_state()
 
@@ -211,17 +215,22 @@ async def main() -> None:
 
     bus = EventBus()
     store = ContextStore(db_path=str(agent_cfg.session_db_path))
-    store.subscribe_to_bus(bus)  # 持久化订阅者
+    store.subscribe_to_bus(bus)  # 持久化订阅者（增量归档/压缩结果）
     renderer = _TerminalRenderer()  # 展示订阅者（内联 exp9）
 
-    session_id, branch_id, history, summary = await _pick_session(printer, renderer, store, session_ctx)
+    session_id, branch_id, history, summary = await _pick_session(
+        printer, renderer, store, session_ctx, keep_recent_turns
+    )
     renderer.bind(bus, session_id)
 
     system_prompt = agent_cfg.default_system_prompt
-    if history is None:
+    is_new = history is None
+    if is_new:
         system_prompt = (
             await renderer.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")
         ) or agent_cfg.default_system_prompt
+    # 注册会话：新建写入原始 system_prompt；恢复传 None 保留 store 已有（KV 前缀一致，不覆盖）
+    await store.ensure_session(session_id, session_ctx, None if not is_new else system_prompt)
 
     compressor = _build_compressor(bus, session_id)
     chat = ChatSession(
@@ -229,7 +238,7 @@ async def main() -> None:
         compressor=compressor, branch_id=branch_id, system_prompt=system_prompt,
         max_llm_loop=agent_cfg.max_llm_loop, max_tool_calls=agent_cfg.max_tool_calls,
         history=history, summary=summary,
-        branch_loader=lambda bid: store.load_branch(session_id, bid),
+        branch_loader=lambda bid: store.load_view(session_id, bid, keep_recent_turns),
         branch_lister=lambda: store.list_branches(session_id),
         branch_creator=lambda parent, point: store.create_branch(session_id, parent, point),
     )
