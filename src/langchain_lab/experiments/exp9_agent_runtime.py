@@ -1,15 +1,16 @@
 """实验9：事件驱动 Agent 运行时入口（消息总线化，面向网络服务化，不动 exp3）
 
-架构边界（事件驱动 / 订阅者化 / 解析前移 / 单一真相源）：
+架构边界（事件驱动 / 订阅者化 / 解析前移 / 单一真相源 / 树形会话）：
 - 输入事件化：终端适配器读输入 → 【适配器层解析+校验】→ 转事件（指令或普通消息）→ publish → ChatSession 订阅响应
-- 指令解析不放在运行时：适配器把 :branch/:branches/:switch/:compress 分类校验后转为
+- 指令解析不放在运行时：适配器把 :branch/:branches/:switch/:compress/:delete/:rename 分类校验后转为
   SESSION_COMMAND / COMPRESS_REQUESTED 事件，普通输入转 USER_MESSAGE_SUBMITTED
 - 输出事件化：ChatSession 发布 STREAM/TOOL/ASSISTANT/SESSION 等事件
-- 持久化订阅者：ContextStore.subscribe_to_bus 订阅增量归档/压缩结果落库（archive 单一真相源，事件即真相）
+- 持久化订阅者：ContextStore.subscribe_to_bus 订阅增量归档/压缩结果/摘要进归档落库（archive 单一真相源）
 - 展示订阅者：终端渲染订阅者【内联本入口】（不复用独立 view 模块，exp9 即展示层）
-- 恢复：入口用 store.load_view 从 archive+summary+system_prompt 构建 llm 视图注入 ChatSession（KV 逐 token 一致），
-  运行时不碰数据库
-- 分支回调：store.create_branch 返回 (new_id, 拐点视图)（从 archive 构建，支持压缩后从历史轮次分叉）
+- 恢复：入口用 store.load_view（回溯完整历史 + 最近摘要 → build_llm_context）注入 ChatSession（KV 逐 token 一致）
+- 分支：store.create_branch 返回 (new_id, 拐点视图)（branch_history 回溯，支持压缩后/继承历史任意位置分叉）
+- 删除：store.delete_branch（级联软删子树）；删 root=删整个会话 → SESSION_DELETED 驱动退出；gc_purge 留手动/后台
+- 命名：新建会话/分支带 name（默认值）；:rename 改当前会话或分支名
 - 运行上限/库路径/默认提示词：按 config/runtime.yaml agent 配置注入
 - MCP 连接 clear_all() 在此 finally（服务停机语义，不放在 ChatSession 内）
 """
@@ -26,6 +27,8 @@ from langchain_lab.core.llm.llm import build_llm, get_llm
 from langchain_lab.core.tools.tool_disclosure import get_init_tools
 from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
 from langchain_lab.util.prompt_style import Printer
+
+_DEFAULT_SESSION_NAME = "新会话"
 
 
 def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
@@ -50,6 +53,14 @@ def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
         if arg:
             return EventType.SESSION_COMMAND, {"action": "branch_switch", "branch_id": arg}
         return None, {"error": "switch 用法：:switch <branch_id>"}
+    if cmd in (":delete", "/delete"):
+        if arg:
+            return EventType.SESSION_COMMAND, {"action": "branch_delete", "branch_id": arg}
+        return None, {"error": "delete 用法：:delete <branch_id>（root=删除整个会话）"}
+    if cmd in (":rename", "/rename"):
+        if arg:
+            return EventType.SESSION_COMMAND, {"action": "rename", "name": arg}
+        return None, {"error": "rename 用法：:rename <新名字>（当前分支 root 改会话名，否则改分支名）"}
     if cmd in (":compress", "/compress"):
         keep = int(arg) if arg.isdigit() and int(arg) >= 1 else None
         return EventType.COMPRESS_REQUESTED, {"force": True, "keep": keep}
@@ -68,6 +79,7 @@ class _TerminalRenderer:
         EventType.SESSION_CREATED,
         EventType.SESSION_RESUMED,
         EventType.SESSION_CLOSED,
+        EventType.SESSION_DELETED,
         EventType.SESSION_NOTICE,
         EventType.HUMAN_MESSAGE_RECEIVED,
         EventType.STREAM_CHUNK,
@@ -106,6 +118,7 @@ class _TerminalRenderer:
             EventType.SESSION_CREATED: self._on_session_created,
             EventType.SESSION_RESUMED: self._on_session_resumed,
             EventType.SESSION_CLOSED: self._on_session_closed,
+            EventType.SESSION_DELETED: self._on_session_deleted,
             EventType.SESSION_NOTICE: self._on_notice,
             EventType.HUMAN_MESSAGE_RECEIVED: self._on_human_message,
             EventType.STREAM_CHUNK: self._on_stream_chunk,
@@ -126,6 +139,9 @@ class _TerminalRenderer:
 
     def _on_session_closed(self, event: Event) -> None:
         self._printer.warning("X" * 20 + " 用户选择终止 " + "X" * 20 + "\n")
+
+    def _on_session_deleted(self, event: Event) -> None:
+        self._printer.warning("X" * 20 + " 会话已删除 " + "X" * 20 + "\n")
 
     def _on_notice(self, event: Event) -> None:
         self._printer.info(str(event.payload))
@@ -165,24 +181,25 @@ class _TerminalRenderer:
 async def _pick_session(
     printer: Printer, renderer: _TerminalRenderer, store: ContextStore, session_ctx: dict,
     keep_recent_turns: int,
-) -> tuple[str, str, list | None, str | None]:
-    """选会话：列出已有会话，编号恢复（从 archive 构建视图）或新建；返回 (session_id, branch_id, history, summary)"""
+) -> tuple[str, str, list | None, str | None, str]:
+    """选会话：列出已有会话，编号恢复（回溯视图）或新建；返回 (session_id, branch_id, history, summary, name)"""
     sessions = await store.list_sessions(
         session_ctx.get("user_id", ""), session_ctx.get("tenant_id", "")
     )
     if sessions:
         printer.info(f"已有 {len(sessions)} 个会话：")
         for i, s in enumerate(sessions, 1):
-            printer.output(f"  [{i}] {s['title'] or '(无标题)'}  · {s['session_id'][:8]}  · {s['status']}")
+            printer.output(f"  [{i}] {s['name'] or '(未命名)'}  · {s['session_id'][:8]}  · {s['status']}")
         choice = (await renderer.prompt_async("输入编号恢复会话（回车新建）：\n> ")).strip()
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(sessions):
                 sid = sessions[idx - 1]["session_id"]
-                history = await store.load_view(sid, "root", keep_recent_turns)  # 从 archive 构建 llm 视图
+                history = await store.load_view(sid, "root", keep_recent_turns)  # 回溯构建 llm 视图
                 summary = await store.load_summary(sid)
-                return sid, "root", history, summary
-    return str(uuid.uuid4()), "root", None, None
+                return sid, "root", history, summary, sessions[idx - 1]["name"]
+    name = (await renderer.prompt_async(f"输入会话名（回车默认「{_DEFAULT_SESSION_NAME}」）：\n> ")).strip()
+    return str(uuid.uuid4()), "root", None, None, name or _DEFAULT_SESSION_NAME
 
 
 def _build_compressor(bus: EventBus, session_id: str) -> SessionCompressor | None:
@@ -215,10 +232,10 @@ async def main() -> None:
 
     bus = EventBus()
     store = ContextStore(db_path=str(agent_cfg.session_db_path))
-    store.subscribe_to_bus(bus)  # 持久化订阅者（增量归档/压缩结果）
+    store.subscribe_to_bus(bus)  # 持久化订阅者（增量归档/压缩结果/摘要进归档）
     renderer = _TerminalRenderer()  # 展示订阅者（内联 exp9）
 
-    session_id, branch_id, history, summary = await _pick_session(
+    session_id, branch_id, history, summary, session_name = await _pick_session(
         printer, renderer, store, session_ctx, keep_recent_turns
     )
     renderer.bind(bus, session_id)
@@ -229,8 +246,12 @@ async def main() -> None:
         system_prompt = (
             await renderer.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")
         ) or agent_cfg.default_system_prompt
-    # 注册会话：新建写入原始 system_prompt；恢复传 None 保留 store 已有（KV 前缀一致，不覆盖）
-    await store.ensure_session(session_id, session_ctx, None if not is_new else system_prompt)
+    # 注册会话：新建写入原始 system_prompt + name；恢复传 None 保留 store 已有（KV 前缀一致，不覆盖）
+    await store.ensure_session(
+        session_id, session_ctx,
+        None if not is_new else system_prompt,
+        session_name if is_new else None,
+    )
 
     compressor = _build_compressor(bus, session_id)
     chat = ChatSession(
@@ -241,10 +262,14 @@ async def main() -> None:
         branch_loader=lambda bid: store.load_view(session_id, bid, keep_recent_turns),
         branch_lister=lambda: store.list_branches(session_id),
         branch_creator=lambda parent, point: store.create_branch(session_id, parent, point),
+        branch_deleter=lambda bid: store.delete_branch(session_id, bid),
+        session_renamer=lambda n: store.rename_session(session_id, n),
+        branch_renamer=lambda bid, n: store.rename_branch(session_id, bid, n),
     )
 
     done = asyncio.Event()
     compress_done = asyncio.Event()
+    session_deleted = asyncio.Event()
 
     def _on_turn_done(e: Event) -> None:
         if e.session_id == session_id:
@@ -254,9 +279,17 @@ async def main() -> None:
         if e.session_id == session_id:
             compress_done.set()
 
+    def _on_deleted(e: Event) -> None:
+        if e.session_id == session_id:
+            session_deleted.set()
+
     bus.subscribe(EventType.AGENT_TURN_DONE, _on_turn_done)
     bus.subscribe(EventType.CONTEXT_COMPRESSED, _on_compressed)
-    renderer.info("提示：分支  :branch <N> / :branches / :switch <id>；手动压缩  :compress [保留轮数]")
+    bus.subscribe(EventType.SESSION_DELETED, _on_deleted)
+    renderer.info(
+        "提示：分支  :branch <N> / :branches / :switch <id>；删除  :delete <id>（root=整会话）；"
+        "重命名  :rename <名>；手动压缩  :compress [保留轮数]"
+    )
 
     try:
         await chat.start(resumed=history is not None)
@@ -277,6 +310,8 @@ async def main() -> None:
                     done.clear()
                     bus.publish(Event(etype, session_id, payload))
                     await done.wait()
+                    if session_deleted.is_set():  # 删了 root（整个会话）→ 退出
+                        break
                 continue
             if payload is not None:  # 像指令但非法 → 适配器层提示
                 renderer.info(payload.get("error", "无法识别的指令"))
