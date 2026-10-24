@@ -9,7 +9,8 @@
   （同压缩时函数与输入，逐 token 一致，KV 前缀命中）。
 - 【两级删除】软删（级联子树 + 标记 archive，不物理删、不冲突）+ gc_purge（物理删不可达，彻底释放）。
 - 【幂等】事件带 event_id，archive UNIQUE(session_id,branch_id,event_id,seq) + INSERT OR IGNORE。
-- 订阅：MESSAGES_ARCHIVED（增量归档）/ SESSION_CLOSED（标关闭）/ CONTEXT_COMPRESSED（摘要进归档+更新summary）。
+- 订阅：MESSAGES_ARCHIVED（增量归档）/ SESSION_CLOSED（标关闭）/ CONTEXT_COMPRESSED（更新会话级 summary 文本）/
+  SUMMARY_ARCHIVED（摘要消息按分支落 archive，由 ChatSession 携带当前 branch_id 发出）。
 - 命名：sessions.name / branches.name（展示用，默认值、非唯一）。
 """
 import asyncio
@@ -81,10 +82,11 @@ class ContextStore:
 
     # ===================== 订阅者 =====================
     def subscribe_to_bus(self, bus: EventBus) -> None:
-        """注册持久化订阅者：增量归档 + 会话关闭 + 压缩摘要进归档/更新 summary"""
+        """注册持久化订阅者：增量归档 + 会话关闭 + 会话级 summary 更新 + 摘要消息按分支归档"""
         bus.subscribe(EventType.MESSAGES_ARCHIVED, self._on_archived)
         bus.subscribe(EventType.SESSION_CLOSED, self._on_session_closed)
         bus.subscribe(EventType.CONTEXT_COMPRESSED, self._on_compressed)
+        bus.subscribe(EventType.SUMMARY_ARCHIVED, self._on_summary_archived)
 
     async def _on_archived(self, event: Event) -> None:
         """每轮增量归档（append-only）：本轮新增真实消息落 archive；event_id 幂等去重"""
@@ -106,7 +108,17 @@ class ContextStore:
             conn.execute("UPDATE sessions SET status='closed' WHERE session_id=?", (event.session_id,))
 
     async def _on_compressed(self, event: Event) -> None:
-        """压缩完成：摘要消息（kind=summary）append 进归档 + 更新 sessions.summary（event_id 幂等）"""
+        """压缩完成：更新会话级 summary 文本（各分支共享；摘要消息归档另走 SUMMARY_ARCHIVED）"""
+        summary = (event.payload or {}).get("summary")
+        if not summary:
+            return
+        await asyncio.to_thread(self._update_summary_sync, event.session_id, summary)
+
+    async def _on_summary_archived(self, event: Event) -> None:
+        """摘要消息按当前分支落 archive（kind=summary，历史摘要保留；event_id 幂等）。
+
+        由 ChatSession 压缩后携带当前 branch_id 发出，确保非 root 分支压缩摘要归属正确。
+        """
         summary = (event.payload or {}).get("summary")
         if not summary:
             return
@@ -164,19 +176,22 @@ class ContextStore:
             )
 
     def _append_summary_sync(self, session_id, branch_id, event_id, summary) -> None:
-        """摘要消息（kind=summary）append 进归档；同一 event_id 幂等"""
+        """摘要消息（kind=summary）append 进指定分支 archive；同一 event_id 幂等"""
         msg_dict = messages_to_dict(
             HumanMessage(content=f"[对话历史摘要]\n{summary}", additional_kwargs={"meta": "summary"})
         )
-        now = time.time()
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO message_archive(session_id, branch_id, event_id, seq, role, kind, payload, deleted, created_at) VALUES(?,?,'summary',0,'human','summary',?,0,?)",
-                (session_id, branch_id, event_id, json.dumps(msg_dict, ensure_ascii=False), now),
+                (session_id, branch_id, event_id, json.dumps(msg_dict, ensure_ascii=False), time.time()),
             )
+
+    def _update_summary_sync(self, session_id, summary) -> None:
+        """更新会话级 summary 文本（各分支共享）"""
+        with sqlite3.connect(self._db_path) as conn:
             conn.execute(
                 "UPDATE sessions SET summary=?, updated_at=? WHERE session_id=?",
-                (summary, now, session_id),
+                (summary, time.time(), session_id),
             )
 
     # ===================== 分支树读取（回溯） =====================

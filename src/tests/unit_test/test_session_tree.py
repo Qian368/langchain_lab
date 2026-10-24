@@ -43,7 +43,6 @@ def test_branch_history_inherits_ancestors():
         await bus.flush()
         hist = await store.branch_history("s1", b1)
         assert [m.content for m in hist] == ["h0", "a0", "h1", "a1", "hB0", "aB0"]
-        # 会话树全量（所有分支增量，无重复）
         full = await store.load_full_history("s1", b1)
         assert [m.content for m in full] == ["h0", "a0", "h1", "a1", "hB0", "aB0"]
     asyncio.run(scenario())
@@ -57,11 +56,9 @@ def test_create_branch_from_branch_inherits():
         store.subscribe_to_bus(bus)
         await _seed_root(store, bus, n=3)
         b1, _ = await store.create_branch("s1", "root", 4)
-        # b1 历史 = h0,a0,h1,a1 + hB0,aB0；从 b1 第 2 条分叉 → 继承 root 的 h0,a0
         b2, pv = await store.create_branch("s1", b1, 2)
         assert pv[0].content == "sys"
         assert [m.content for m in pv[1:]] == ["h0", "a0"]
-        # 多级：b2 的分支历史 = 继承 root(前4) + b1(前2) + b2 自有
         bus.publish(Event(EventType.MESSAGES_ARCHIVED, "s1", {"branch_id": b2, "messages": _arch([HumanMessage(content="hB20")])}))
         await bus.flush()
         hist = await store.branch_history("s1", b2)
@@ -71,21 +68,40 @@ def test_create_branch_from_branch_inherits():
 
 # —— 摘要进归档 + 恢复取最近 ——
 def test_summary_archived_and_recent_in_load_view():
-    """CONTEXT_COMPRESSED → 摘要 kind=summary 进归档；load_view 取最近一条摘要重建视图"""
+    """SUMMARY_ARCHIVED → 摘要 kind=summary 进归档；load_view 取最近一条重建视图"""
     async def scenario():
         bus = EventBus()
         store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
         store.subscribe_to_bus(bus)
         await _seed_root(store, bus, n=3)
-        bus.publish(Event(EventType.CONTEXT_COMPRESSED, "s1", {"summary": "摘要一", "branch_id": "root", "forced": False}))
-        bus.publish(Event(EventType.CONTEXT_COMPRESSED, "s1", {"summary": "摘要二", "branch_id": "root", "forced": True}))
+        bus.publish(Event(EventType.SUMMARY_ARCHIVED, "s1", {"summary": "摘要一", "branch_id": "root"}))
+        bus.publish(Event(EventType.SUMMARY_ARCHIVED, "s1", {"summary": "摘要二", "branch_id": "root"}))
         await bus.flush()
-        # 归档里有多条 kind=summary（历史摘要保留），load_view 取最近一条
         view = await store.load_view("s1", "root", keep_recent_turns=2)
         assert view[0].content == "sys"
         assert isinstance(view[1], HumanMessage) and view[1].additional_kwargs.get("meta") == "summary"
         assert view[1].content == "[对话历史摘要]\n摘要二"
-        assert [m.content for m in view[2:]] == ["h2", "a2"]  # 最近 keep=2 轮
+        assert [m.content for m in view[2:]] == ["h2", "a2"]
+    asyncio.run(scenario())
+
+
+def test_summary_archived_to_current_branch():
+    """摘要按当前分支落归档：非 root 分支压缩摘要归属正确（不在 root）"""
+    async def scenario():
+        bus = EventBus()
+        store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
+        store.subscribe_to_bus(bus)
+        await _seed_root(store, bus, n=3)
+        b1, _ = await store.create_branch("s1", "root", 4)
+        # 在 b1 分支压缩 → 摘要落 b1
+        bus.publish(Event(EventType.SUMMARY_ARCHIVED, "s1", {"summary": "b1摘要", "branch_id": b1}))
+        await bus.flush()
+        # root 归档不含该摘要
+        assert not any(m.type == "human" and m.additional_kwargs.get("meta") == "summary" for m in await store.branch_history("s1", "root"))
+        # b1 恢复取到该摘要
+        v = await store.load_view("s1", b1, keep_recent_turns=6)
+        assert isinstance(v[1], HumanMessage) and v[1].additional_kwargs.get("meta") == "summary"
+        assert v[1].content == "[对话历史摘要]\nb1摘要"
     asyncio.run(scenario())
 
 
@@ -100,21 +116,16 @@ def test_delete_branch_soft_and_gc():
         b1, _ = await store.create_branch("s1", "root", 4)
         bus.publish(Event(EventType.MESSAGES_ARCHIVED, "s1", {"branch_id": b1, "messages": _arch([HumanMessage(content="hB0")])}))
         await bus.flush()
-        # 删除 b1
         deleted = await store.delete_branch("s1", b1)
         assert deleted == [b1]
-        # list_branches 过滤 deleted
         ids = [b["branch_id"] for b in await store.list_branches("s1")]
         assert b1 not in ids and "root" in ids
-        # 软删后 load_view 不可读（抛 ValueError）
         try:
             await store.load_view("s1", b1, 6)
             raise AssertionError("软删分支应不可读")
         except ValueError:
             pass
-        # 父分支历史不受影响（root 全量保留）
         assert [m.content for m in await store.branch_history("s1", "root")] == ["h0", "a0", "h1", "a1", "h2", "a2"]
-        # gc 物理清理
         r = await store.gc_purge()
         assert r["branches"] >= 1 and r["archive"] >= 1
     asyncio.run(scenario())
@@ -145,7 +156,7 @@ def test_delete_session_soft():
         await store.delete_session("s1")
         ids = [s["session_id"] for s in await store.list_sessions("u1", "t1")]
         assert "s1" not in ids and "s2" in ids
-        assert (await store.load_view("s1", "root", 6)) is None  # 删除后不可读
+        assert (await store.load_view("s1", "root", 6)) is None
         r = await store.gc_purge()
         assert r["sessions"] == 1
     asyncio.run(scenario())
@@ -163,7 +174,6 @@ def test_rename_session_and_branch():
         assert sessions[0]["name"] == "会话新名"
         branches = await store.list_branches("s1")
         assert any(b["branch_id"] == b1 and b["name"] == "分支B" for b in branches)
-        # 默认分支名
         b2, _ = await store.create_branch("s1", "root", 2)
         branches = await store.list_branches("s1")
         assert any(b["branch_id"] == b2 and b["name"] for b in branches)
@@ -175,8 +185,6 @@ def test_session_command_branch_delete_switch_root():
     """删除当前分支（非 root）：软删后自动切回根分支"""
     async def scenario():
         bus = EventBus()
-        notices = []
-        bus.subscribe(EventType.SESSION_NOTICE, lambda e: notices.append(e.payload))
         deleted = []
         async def deleter(bid):
             deleted.append(bid)
@@ -191,7 +199,7 @@ def test_session_command_branch_delete_switch_root():
         bus.publish(Event(EventType.SESSION_COMMAND, "s1", {"action": "branch_delete", "branch_id": "b1"}))
         await bus.flush()
         assert deleted == ["b1"]
-        assert chat._branch_id == "root"  # 自动切回根
+        assert chat._branch_id == "root"
         assert [m.content for m in chat._messages] == ["sys"]
     asyncio.run(scenario())
 

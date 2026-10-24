@@ -6,6 +6,7 @@
 - 单源消息：运行时只维护一份 _messages（即当前视图）；每轮新消息 append 累积，
   压缩时由 build_llm_context 改写 _messages = System+Human摘要+最近 keep 轮（早期轮移出，已归档）
 - 每轮增量归档：_handle_turn 末尾发 MESSAGES_ARCHIVED（本轮新增真实消息，事件自动带 event_id），ContextStore append 落库
+- 压缩摘要归档：压缩完成后发 SUMMARY_ARCHIVED（携带当前 branch_id），摘要消息按分支落 archive kind=summary
 - 输出事件化：展示/进度全部 publish（STREAM/TOOL/ASSISTANT/AGENT_TURN/...）
 - 持久化单一真相源：不持有 store；每轮只发归档事件；恢复视图由入口从 archive 构建注入（KV 逐 token 一致）
 - 压缩后置事件化：每轮结束发 COMPRESS_REQUESTED(force=False) 自动触发，前端可手动提前(force=True)
@@ -118,7 +119,7 @@ class ChatSession:
         return self._do_compress(event)
 
     async def _do_compress(self, event: Event) -> None:
-        """串行压缩：生成摘要 + 改写 _messages = 摘要+最近 keep 轮（早期轮移出，已归档）"""
+        """串行压缩：生成摘要 + 改写 _messages = 摘要+最近 keep 轮 + 摘要消息按当前分支归档"""
         payload = event.payload or {}
         force = bool(payload.get("force", False))
         keep = payload.get("keep")
@@ -130,6 +131,11 @@ class ChatSession:
                 self._summary = new_summary
                 # 视图重建：早期轮从 _messages 移出（已由 MESSAGES_ARCHIVED 增量归档），摘要置顶
                 self._messages = self._compressor.build_llm_context(self._messages, new_summary)
+                # 摘要消息按当前分支归档（store 订阅 SUMMARY_ARCHIVED 落 archive kind=summary，event_id 幂等）
+                self._emit(
+                    EventType.SUMMARY_ARCHIVED,
+                    payload={"branch_id": self._branch_id, "summary": new_summary},
+                )
                 # 视图变化立即同步（前端）
                 self._emit_session_state()
 
