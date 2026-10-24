@@ -1,4 +1,4 @@
-"""ContextStore 单测（单一真相源）：ensure_session + 归档 + load_view 构建视图 + 分支拐点视图 + 幂等去重（不依赖 LLM）"""
+"""ContextStore 单测（单一真相源+树形）：ensure_session + 归档 + load_view 构建视图 + 分支拐点视图 + 幂等去重（不依赖 LLM）"""
 import asyncio
 import tempfile
 from pathlib import Path
@@ -31,16 +31,14 @@ def test_ensure_session_and_view_new():
 
 
 def test_view_rebuilds_after_compress():
-    """已压缩：load_view 用 summary 构建 System+Human摘要+最近 keep 轮（KV 逐 token 一致）"""
+    """已压缩：摘要经 SUMMARY_ARCHIVED 进 archive，load_view 从 archive 取最近摘要构建 System+摘要+最近 keep 轮（KV 一致）"""
     async def scenario():
         bus = EventBus()
         store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
         store.subscribe_to_bus(bus)
         await store.ensure_session("s1", {"user_id": "u1", "tenant_id": "t1"}, system_prompt="sys")
-        # 早期轮已归档（压缩前每轮追加，含被压缩移出的轮）
         bus.publish(Event(EventType.MESSAGES_ARCHIVED, "s1", {"branch_id": "root", "messages": messages_to_dict([HumanMessage(content="h0"), AIMessage(content="a0"), HumanMessage(content="h1"), AIMessage(content="a1"), HumanMessage(content="h2"), AIMessage(content="a2")])}))
-        # 压缩完成落库摘要
-        bus.publish(Event(EventType.CONTEXT_COMPRESSED, "s1", {"summary": "摘要", "compressed_turns": 1, "forced": False}))
+        bus.publish(Event(EventType.SUMMARY_ARCHIVED, "s1", {"summary": "摘要", "branch_id": "root"}))
         await bus.flush()
         view = await store.load_view("s1", "root", keep_recent_turns=2)
         assert [m.type for m in view] == ["system", "human", "human", "ai", "human", "ai"]
