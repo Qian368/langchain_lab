@@ -11,6 +11,7 @@
 - 压缩后置事件化：每轮结束发 COMPRESS_REQUESTED(force=False) 自动触发，前端可手动提前(force=True)
 - 分支：store 从 archive 构建拐点视图（System + 前 point 轮真实消息，支持压缩后从历史轮次分叉），
   由 branch_creator 回调返回 (new_id, point_view)；运行时不碰持久化实现
+- 删除/重命名：走注入回调（branch_deleter/session_renamer/branch_renamer），运行时只响应语义化事件
 - 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入；不碰 MCP 连接
 """
 import asyncio
@@ -58,6 +59,9 @@ class ChatSession:
         branch_loader=None,  # async (branch_id)->list|None：加载指定分支视图（入口用 context_store 实现）
         branch_lister=None,  # async ()->list[dict]：列分支
         branch_creator=None,  # async (parent_id, point)->(new_id, point_view)：建分支，返回新 id 与拐点视图
+        branch_deleter=None,  # async (branch_id)->list[str]：删除分支（级联软删子树），返回被删 id 列表
+        session_renamer=None,  # async (name)->None：重命名会话（当前分支为 root 时）
+        branch_renamer=None,  # async (branch_id, name)->None：重命名分支
     ):
         self._session_id = session_id
         self._session_ctx = session_ctx
@@ -77,6 +81,9 @@ class ChatSession:
         self._branch_loader = branch_loader
         self._branch_lister = branch_lister
         self._branch_creator = branch_creator
+        self._branch_deleter = branch_deleter
+        self._session_renamer = session_renamer
+        self._branch_renamer = branch_renamer
         self._compress_lock = asyncio.Lock()  # 压缩串行化（自动/手动并发不竞态）
         # 订阅输入事件（网络服务化：输入适配器 publish，本会话响应；按 session_id 隔离）
         bus.subscribe(EventType.USER_MESSAGE_SUBMITTED, self._on_user_message)
@@ -133,7 +140,7 @@ class ChatSession:
         return self._handle_command_event(event)
 
     async def _handle_command_event(self, event: Event) -> None:
-        """按 action 处理分支等控制指令；不解析原始文本"""
+        """按 action 处理分支/删除/重命名等控制指令；不解析原始文本"""
         self._emit(EventType.AGENT_TURN_START)
         payload = event.payload or {}
         action = payload.get("action")
@@ -144,6 +151,10 @@ class ChatSession:
                 await self._do_branch_create(payload.get("point"))
             elif action == "branch_switch":
                 await self._do_branch_switch(payload.get("branch_id"))
+            elif action == "branch_delete":
+                await self._do_branch_delete(payload.get("branch_id"))
+            elif action == "rename":
+                await self._do_rename(payload.get("name"))
             else:
                 self._notice(f"未知指令 action={action}")
             self._emit_session_state()
@@ -163,7 +174,7 @@ class ChatSession:
             self._notice("暂无分支")
             return
         lines = [
-            f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}"
+            f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}  {b.get('name','')}"
             + (" *" if b["branch_id"] == self._branch_id else "")
             for b in branches
         ]
@@ -208,6 +219,55 @@ class ChatSession:
         self._branch_id = branch_id
         self._messages = restored
         self._notice(f"已切换到分支 {branch_id}（{len(restored) - 1} 条对话）")
+
+    async def _do_branch_delete(self, branch_id) -> None:
+        """删除分支（级联软删子树）。删 root=删整个会话（发 SESSION_DELETED，入口退出）；删当前分支则切回根分支"""
+        if not branch_id:
+            self._notice("用法：branch_delete 需 branch_id（root=删除整个会话）")
+            return
+        if self._branch_deleter is None:
+            self._notice("无上下文存储，无法删除分支")
+            return
+        try:
+            deleted = await self._branch_deleter(branch_id)
+        except ValueError as exc:
+            self._notice(str(exc))
+            return
+        self._notice(f"已删除分支 {branch_id}（含 {len(deleted) - 1} 个后代分支）")
+        if self._branch_id not in deleted:
+            return
+        # 当前分支被删：root 被删=删整个会话；否则切回根分支
+        if branch_id == "root" or "root" in deleted:
+            self._notice("根分支（整个会话）已删除，本次会话结束")
+            self._emit(EventType.SESSION_DELETED, payload={"branch_id": branch_id})
+        else:
+            self._branch_id = "root"
+            try:
+                restored = await self._branch_loader("root")
+                self._messages = restored if restored else [SystemMessage(content=self._messages[0].content)]
+                self._notice("当前分支已删除，已切回根分支")
+            except Exception:  # noqa: BLE001
+                self._messages = [SystemMessage(content=self._messages[0].content)]
+                self._notice("当前分支已删除，已切回根分支（视图重建失败，重置为新会话）")
+
+    async def _do_rename(self, name) -> None:
+        """重命名：当前分支为 root → 会话名；否则分支名"""
+        if not name or not name.strip():
+            self._notice("用法：rename 需非空名字")
+            return
+        name = name.strip()
+        if self._branch_id == "root":
+            if self._session_renamer is None:
+                self._notice("无上下文存储，无法重命名会话")
+                return
+            await self._session_renamer(name)
+            self._notice(f"会话已重命名为「{name}」")
+        else:
+            if self._branch_renamer is None:
+                self._notice("无上下文存储，无法重命名分支")
+                return
+            await self._branch_renamer(self._branch_id, name)
+            self._notice(f"分支 {self._branch_id} 已重命名为「{name}」")
 
     # —— 生命周期 ——
     async def start(self, resumed: bool = False) -> None:

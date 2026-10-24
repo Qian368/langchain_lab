@@ -2,7 +2,7 @@
 
 事件分级：
 - 输入驱动：外部适配器 publish，会话订阅触发（USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED / SESSION_COMMAND）
-- 会话生命周期：SESSION_*（创建/恢复/关闭/系统提示）
+- 会话生命周期：SESSION_*（创建/恢复/关闭/系统提示/删除）
 - 轮次边界：AGENT_TURN_START / DONE（一次输入的处理开始/结束，供驱动等待+前端进度）
 - 过程事件：逐片/即时，给展示（流式打字、工具进度、用户回显）
 - 完整事件：累积完成，给持久化/完整语义（ASSISTANT_MESSAGE_EMITTED / TURN_COMPLETE）
@@ -29,6 +29,7 @@ class EventType(StrEnum):
     SESSION_CREATED = "session_created"
     SESSION_RESUMED = "session_resumed"
     SESSION_CLOSED = "session_closed"
+    SESSION_DELETED = "session_deleted"  # 会话（根分支）被删除，入口监听后退出循环
     SESSION_NOTICE = "session_notice"  # 会话内系统提示（分支提示等），展示层渲染
     # —— 轮次边界（一次输入的处理开始/结束）——
     AGENT_TURN_START = "agent_turn_start"
