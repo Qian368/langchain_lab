@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from time import time
 from typing import Any
+from uuid import uuid4
 
 
 class EventType(StrEnum):
@@ -52,9 +53,14 @@ class EventType(StrEnum):
 
 @dataclass(slots=True)
 class Event:
-    """统一事件载体。session_id 在事件里，订阅者按需过滤（总线全局，天然支持多会话隔离）"""
+    """统一事件载体。session_id 在事件里，订阅者按需过滤（总线全局，天然支持多会话隔离）
+
+    event_id：源头生成的全局唯一标识（UUID hex）。持久化订阅者用它做幂等键（INSERT OR IGNORE），
+    网络化后客户端重试/重复投递天然去重，不乱序。
+    """
 
     type: EventType
     session_id: str
     payload: Any = None
+    event_id: str = field(default_factory=lambda: uuid4().hex)  # 源头唯一标识，幂等去重基础
     timestamp: float = field(default_factory=time)
