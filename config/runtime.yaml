@@ -3,6 +3,7 @@ compression:
   enabled: true          # 是否启用上下文压缩
   keep_recent_turns: 6   # 压缩后保留的最近轮数（LLM 视图只保留最近 N 轮 + 摘要置顶）
   summarize_model: default  # 压缩摘要用的 LLM 实例名（对应 config/llm.yaml 的 instances 键）
+  summarize_prompt: null # 压缩指令文本（HumanMessage 追加在压缩请求末尾；null 用内置默认）
 
 agent:
   max_llm_loop: 3        # 单轮对话 LLM 最大迭代次数（原 agent_session.py 硬编码 MAX_LLM_LOOP）

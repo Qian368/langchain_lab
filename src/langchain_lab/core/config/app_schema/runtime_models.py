@@ -17,6 +17,10 @@ class CompressionSettings(EventedModel):
     enabled: bool = Field(default=True, description="是否启用上下文压缩")
     keep_recent_turns: int = Field(default=6, ge=1, description="压缩后保留的最近轮数")
     summarize_model: str | None = Field(default="default", description="压缩摘要用的 LLM 实例名")
+    summarize_prompt: str | None = Field(
+        default=None,
+        description="压缩指令文本（HumanMessage 追加在压缩请求末尾；None 用内置默认）",
+    )
 
 
 class AgentSettings(EventedModel):

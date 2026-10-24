@@ -194,6 +194,7 @@ def _build_compressor(bus: EventBus, session_id: str) -> SessionCompressor | Non
     return SessionCompressor(
         summarize_llm=summarize_llm,
         keep_recent_turns=comp_cfg.keep_recent_turns,
+        summarize_prompt=comp_cfg.summarize_prompt,
         bus=bus,
         session_id=session_id,
     )
