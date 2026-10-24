@@ -5,11 +5,12 @@
 - 控制钩子（AgentHooks）：pre_user_message / post_llm / post_tool 三个同步可干预埋点，默认 None
 - 单源消息：运行时只维护一份 _messages（即当前视图）；每轮新消息 append 累积，
   压缩时由 build_llm_context 改写 _messages = System+Human摘要+最近 keep 轮（早期轮移出，已归档）
-- 每轮增量归档：_handle_turn 末尾发 MESSAGES_ARCHIVED（本轮新增真实消息），ContextStore append 落库，全量历史可重建
+- 每轮增量归档：_handle_turn 末尾发 MESSAGES_ARCHIVED（本轮新增真实消息，事件自动带 event_id），ContextStore append 落库
 - 输出事件化：展示/进度全部 publish（STREAM/TOOL/ASSISTANT/AGENT_TURN/...）
-- 副作用订阅者化：不持有 store；每轮发布 SESSION_STATE_UPDATED（当前视图快照），持久化由订阅者落库
+- 持久化单一真相源：不持有 store；每轮只发归档事件；恢复视图由入口从 archive 构建注入（KV 逐 token 一致）
 - 压缩后置事件化：每轮结束发 COMPRESS_REQUESTED(force=False) 自动触发，前端可手动提前(force=True)
-- 分支操作走注入回调（branch_loader/lister/creator），由 SESSION_COMMAND 事件触发
+- 分支：store 从 archive 构建拐点视图（System + 前 point 轮真实消息，支持压缩后从历史轮次分叉），
+  由 branch_creator 回调返回 (new_id, point_view)；运行时不碰持久化实现
 - 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入；不碰 MCP 连接
 """
 import asyncio
@@ -52,11 +53,11 @@ class ChatSession:
         system_prompt: str = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务",
         max_llm_loop: int = 3,  # 单轮 LLM 最大迭代（入口按 runtime.yaml 注入）
         max_tool_calls: int = 4,  # 单轮最大工具调用（入口按 runtime.yaml 注入）
-        history: list[BaseMessage] | None = None,  # 恢复：入口从 context_store 加载注入（即上次视图，含 system）
+        history: list[BaseMessage] | None = None,  # 恢复：入口从 archive 构建的 llm 视图注入（含 system/摘要），无则新建
         summary: str | None = None,  # 恢复：会话级压缩摘要
-        branch_loader=None,  # async (branch_id)->list|None：加载指定分支历史（入口用 context_store 实现）
+        branch_loader=None,  # async (branch_id)->list|None：加载指定分支视图（入口用 context_store 实现）
         branch_lister=None,  # async ()->list[dict]：列分支
-        branch_creator=None,  # async (parent_id, point)->str：建分支返回新 id
+        branch_creator=None,  # async (parent_id, point)->(new_id, point_view)：建分支，返回新 id 与拐点视图
     ):
         self._session_id = session_id
         self._session_ctx = session_ctx
@@ -68,7 +69,7 @@ class ChatSession:
         self._branch_id = branch_id
         self._max_llm_loop = max_llm_loop
         self._max_tool_calls = max_tool_calls
-        # 恢复时注入历史（即上次视图，含 system 与摘要消息），否则新建用 system_prompt 打底
+        # 恢复时注入视图历史（含 system/摘要），否则新建用 system_prompt 打底
         self._messages: list[BaseMessage] = (
             history if history is not None else [SystemMessage(content=system_prompt)]
         )
@@ -122,7 +123,7 @@ class ChatSession:
                 self._summary = new_summary
                 # 视图重建：早期轮从 _messages 移出（已由 MESSAGES_ARCHIVED 增量归档），摘要置顶
                 self._messages = self._compressor.build_llm_context(self._messages, new_summary)
-                # 视图变化立即同步（持久化快照 / 前端）
+                # 视图变化立即同步（前端）
                 self._emit_session_state()
 
     def _on_command(self, event: Event):
@@ -169,18 +170,23 @@ class ChatSession:
         self._notice("分支列表：\n" + "\n".join(lines))
 
     async def _do_branch_create(self, point) -> None:
-        """创建子分支：快照式，子分支初始 = 拐点前（含系统提示 + 前 point 条对话）"""
+        """创建子分支：store 从 archive 构建拐点视图（System + 前 point 轮真实消息），返回 (new_id, point_view)
+
+        支持压缩后从历史轮次分叉：拐点视图基于 archive 无损全量真实消息，而非当前视图快照切片（
+        压缩后早期轮已移出视图，旧实现 _messages[:point+1] 在拐点早于压缩点时静默错误）。
+        """
         if not isinstance(point, int) or point < 1:
             self._notice("用法：branch_create 需 point>=1（对话消息序号）")
-            return
-        if point >= len(self._messages):
-            self._notice(f"序号 {point} 超出当前消息数（{len(self._messages) - 1} 条对话）")
             return
         if self._branch_creator is None:
             self._notice("无上下文存储，无法创建分支")
             return
-        new_branch = await self._branch_creator(self._branch_id, point)
-        self._messages = self._messages[: point + 1]
+        try:
+            new_branch, point_view = await self._branch_creator(self._branch_id, point)
+        except ValueError as exc:
+            self._notice(str(exc))  # 拐点越界等，交给 store 校验后提示
+            return
+        self._messages = point_view
         self._branch_id = new_branch
         self._notice(f"已创建分支 {new_branch}（拐点 seq={point}），后续输入进入该分支")
 
@@ -191,7 +197,11 @@ class ChatSession:
         if self._branch_loader is None:
             self._notice("无上下文存储，无法切换分支")
             return
-        restored = await self._branch_loader(branch_id)
+        try:
+            restored = await self._branch_loader(branch_id)
+        except ValueError as exc:
+            self._notice(str(exc))
+            return
         if restored is None:
             self._notice(f"分支 {branch_id} 不存在或不属于本会话")
             return
@@ -205,14 +215,13 @@ class ChatSession:
         self._emit(EventType.SESSION_RESUMED if resumed else EventType.SESSION_CREATED)
 
     async def close(self) -> None:
-        """会话关闭：发最终兜底快照 + 关闭事件，flush 等后台落库完成。不碰 MCP 连接"""
-        self._emit_session_state()
+        """会话关闭：发关闭事件，flush 等后台落库完成。不碰 MCP 连接"""
         self._emit(EventType.SESSION_CLOSED)
         await self._bus.flush()
 
     # —— 一轮普通消息处理 ——
     async def _handle_turn(self, content: str) -> None:
-        """处理一条普通用户消息（适配器已确认非指令）→ Agent 推理；末尾发增量归档 + 状态快照"""
+        """处理一条普通用户消息（适配器已确认非指令）→ Agent 推理；末尾发增量归档 + 视图同步"""
         self._emit(EventType.AGENT_TURN_START)
         start_idx = len(self._messages)  # 本轮开始前的消息数，用于增量归档
         try:
@@ -223,9 +232,9 @@ class ChatSession:
             visible_tools = await get_disclosure_tools(self._session_ctx, self._messages)
             llm_with_tools = self._llm.bind_tools(tools=visible_tools)
             await self._agent_loop(llm_with_tools=llm_with_tools)
-            # 每轮增量归档：本轮新增真实消息（排除 system/摘要），append 落库，全量历史可重建
+            # 每轮增量归档：本轮新增真实消息（排除 system/摘要），append 落库（事件自动带 event_id 幂等）
             self._archive_new_messages(start_idx)
-            # 发布当前视图快照，持久化订阅者落库（事件即真相）
+            # 视图同步（前端展示），持久化依赖归档事件（单一真相源）
             self._emit_session_state()
             self._emit(
                 EventType.TURN_COMPLETE,
@@ -254,7 +263,7 @@ class ChatSession:
             )
 
     def _emit_session_state(self) -> None:
-        """发布当前视图完整快照（可序列化，供持久化订阅者落库 / 前端同步）"""
+        """发布当前视图完整快照（可序列化，供前端同步 / 日志订阅）"""
         self._emit(
             EventType.SESSION_STATE_UPDATED,
             payload={
@@ -276,7 +285,7 @@ class ChatSession:
         return self._messages
 
     def _emit(self, event_type: EventType, payload=None) -> None:
-        """统一发布事件，session_id 自动填充（多会话隔离基础）"""
+        """统一发布事件，session_id 自动填充（多会话隔离基础）；event_id 由 Event 自动生成（幂等去重）"""
         self._bus.publish(Event(type=event_type, session_id=self._session_id, payload=payload))
 
     async def _agent_loop(self, llm_with_tools) -> None:
