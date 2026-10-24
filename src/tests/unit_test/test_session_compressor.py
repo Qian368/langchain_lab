@@ -1,4 +1,7 @@
-"""SessionCompressor 单测：轮次切分 / 摘要生成 / 双视图投影 / 手动提前压缩（不连真实 LLM）"""
+"""SessionCompressor 单测：轮次切分 / 摘要生成 / 双视图投影 / 手动提前压缩（不连真实 LLM）
+
+覆盖 KV 前缀一致性：压缩请求 = 视图去掉最近 keep 轮【原封不动】+ 追加固定 Human 指令。
+"""
 import asyncio
 from types import SimpleNamespace
 
@@ -35,6 +38,14 @@ def test_split_turns():
     assert len(turns) == 2
     assert turns[0][0].content == "h0"
     assert turns[1][0].content == "h1"
+
+
+def test_split_turns_skips_summary_message():
+    """摘要消息（HumanMessage meta=summary）不当作真实轮"""
+    msgs = _msgs_with_turns(2)
+    view = [msgs[0], HumanMessage(content="[对话历史摘要]\n摘要", additional_kwargs={"meta": "summary"})] + msgs[1:]
+    comp = _comp(k=1)
+    assert len(comp.split_turns(view)) == 2  # 只数到 h0/a0, h1/a1 两轮
 
 
 def test_maybe_compress_below_threshold_returns_none():
@@ -74,16 +85,44 @@ def test_force_compress_no_early_returns_none():
 
 
 def test_build_llm_context_with_summary():
+    """LLM 视图：System + Human(摘要,meta=summary) 固定第 2 条 + 最近 1 轮"""
     comp = SessionCompressor(None, keep_recent_turns=1, bus=EventBus(), session_id="s1")
     ctx = comp.build_llm_context(_msgs_with_turns(2), "摘要")
-    # System + 摘要置顶 + 最近 1 轮(h1,a1)
-    assert [m.content for m in ctx] == ["sys", "[早期上下文摘要]\n摘要", "h1", "a1"]
+    assert isinstance(ctx[1], HumanMessage)
+    assert ctx[1].content == "[对话历史摘要]\n摘要"
+    assert ctx[1].additional_kwargs.get("meta") == "summary"
+    assert [m.content for m in ctx] == ["sys", "[对话历史摘要]\n摘要", "h1", "a1"]
+
+
+def test_build_compress_input_prefix_preserved():
+    """压缩请求 = 视图去掉最近 keep 轮【原封不动】（不过滤 system、不重排角色）+ 末尾固定 Human 指令"""
+    comp = SessionCompressor(None, keep_recent_turns=2, bus=EventBus(), session_id="s1")
+    view = comp.build_llm_context(_msgs_with_turns(5), "摘要")
+    request, early = comp.build_compress_input(view, 2)
+    assert early == 3  # 压掉前 3 轮
+    # 结构：System + Human摘要 + 前3轮原样 + 末尾 Human 压缩指令
+    assert isinstance(request[0], SystemMessage)
+    assert request[1].additional_kwargs.get("meta") == "summary"
+    # 早期轮原封不动（顺序/角色未改）
+    assert request[2].content == "h0" and request[3].content == "a0"
+    assert request[4].content == "h1" and request[5].content == "a1"
+    assert request[6].content == "h2" and request[7].content == "a2"
+    # 末尾追加固定指令（HumanMessage）
+    assert isinstance(request[-1], HumanMessage)
+    assert "总结" in request[-1].content
+
+
+def test_build_compress_input_no_early():
+    """消息不足保留数 → (None, 0)"""
+    comp = SessionCompressor(None, keep_recent_turns=2, bus=EventBus(), session_id="s1")
+    request, early = comp.build_compress_input(_msgs_with_turns(2), 2)
+    assert request is None and early == 0
 
 
 def test_build_display_context_collapse():
+    """前端视图：折叠占位 + 最近 1 轮真实消息（不含摘要）"""
     comp = SessionCompressor(None, keep_recent_turns=1, bus=EventBus(), session_id="s1")
     disp = comp.build_display_context(_msgs_with_turns(2), "摘要")
-    # 前端视图：折叠占位 + 最近 1 轮真实消息（不含摘要）
     assert disp[0]["kind"] == "collapse"
     assert disp[0]["collapsed_count"] == 2  # h0,a0
     assert [d["kind"] for d in disp[1:]] == ["message", "message"]
