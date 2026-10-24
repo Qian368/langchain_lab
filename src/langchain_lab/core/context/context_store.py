@@ -1,11 +1,13 @@
 """ContextStore：会话上下文持久化（订阅者模式，事件溯源）
 
-- 会话不引用本 store：订阅 SESSION_STATE_UPDATED（完整可序列化快照）落库；
-  SESSION_CLOSED 标记关闭；CONTEXT_COMPRESSED 立即落库新摘要（不等下轮快照）。
-- 入口用它加载历史（load_branch / load_summary）注入会话，并实现分支操作回调。
-- 公开 save/load 仅供入口写库与测试；运行时持久化一律走订阅者（事件即真相）。
-- schema 面向 SaaS 检索 / 压缩归档 / 会话分支 预留。
-- 分支存储采用【快照式】：子分支自包含完整历史；load_branch 统一读本分支全量。
+- 会话不引用本 store：订阅 SESSION_STATE_UPDATED（当前视图快照）落库；SESSION_CLOSED 标记关闭；
+  CONTEXT_COMPRESSED 立即落库摘要；MESSAGES_ARCHIVED 增量归档每轮新增真实消息（append-only）
+- 双轨持久化：
+  * message_archive（append-only）= 全量历史，每轮增量追加，压缩改写视图不影响，可 load_full_history 重建
+  * messages 表（覆盖）= 当前视图（压缩后 = System+Human摘要+最近keep轮），load_branch 恢复时注入会话
+- 入口用它加载视图历史（load_branch）注入会话，并实现分支操作回调；load_full_history 供审计/SaaS 检索
+- 公开 save/load 仅供入口写库与测试；运行时持久化一律走订阅者（事件即真相）
+- 分支存储采用【快照式】：子分支自包含完整视图历史；load_branch 统一读本分支当前视图
 """
 import asyncio
 import json
@@ -21,7 +23,7 @@ from langchain_lab.core.events import Event, EventType
 
 
 class ContextStore:
-    """SQLite 会话存储：订阅状态快照落库；load/分支/summary/list 供入口恢复与 SaaS 检索"""
+    """SQLite 会话存储：订阅状态快照/归档落库；load/分支/summary/list 供入口恢复与 SaaS 检索"""
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
@@ -45,13 +47,21 @@ class ContextStore:
                     session_id TEXT,
                     branch_id TEXT DEFAULT 'root',
                     seq INTEGER,
-                    turn_id INTEGER DEFAULT 0,
                     role TEXT,
                     payload TEXT,
-                    archived INTEGER DEFAULT 0,
                     UNIQUE(session_id, branch_id, seq)
                 );
-                CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+                CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, branch_id);
+                CREATE TABLE IF NOT EXISTS message_archive(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    branch_id TEXT DEFAULT 'root',
+                    seq INTEGER,          -- 本轮内局部序号（全量顺序按自增 id）
+                    role TEXT,
+                    payload TEXT,
+                    created_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_archive_session ON message_archive(session_id, branch_id);
                 CREATE TABLE IF NOT EXISTS branches(
                     branch_id TEXT PRIMARY KEY,
                     session_id TEXT,
@@ -65,15 +75,16 @@ class ContextStore:
 
     # ===================== 订阅者 =====================
     def subscribe_to_bus(self, bus: EventBus) -> None:
-        """注册为持久化订阅者：状态快照落库 + 会话关闭标记 + 压缩结果立即落库摘要"""
+        """注册为持久化订阅者：视图快照 + 会话关闭 + 压缩摘要 + 每轮增量归档"""
         bus.subscribe(EventType.SESSION_STATE_UPDATED, self._on_state_updated)
         bus.subscribe(EventType.SESSION_CLOSED, self._on_session_closed)
         bus.subscribe(EventType.CONTEXT_COMPRESSED, self._on_compressed)
+        bus.subscribe(EventType.MESSAGES_ARCHIVED, self._on_archived)
 
     async def _on_state_updated(self, event: Event) -> None:
-        """async handler：快照落库（不阻塞事件循环）"""
+        """async handler：当前视图快照落库（不阻塞事件循环）"""
         payload = event.payload or {}
-        dicts = payload.get("messages") or []  # 已是 messages_to_dict 的可序列化快照
+        dicts = payload.get("messages") or []
         if not dicts:
             return
         await asyncio.to_thread(
@@ -101,7 +112,20 @@ class ContextStore:
                 (summary, time.time(), event.session_id),
             )
 
-    # ===================== 保存（公开，供入口写库与测试；运行时持久化走订阅者） =====================
+    async def _on_archived(self, event: Event) -> None:
+        """每轮增量归档（append-only）：本轮新增真实消息落 message_archive，全量历史可重建"""
+        payload = event.payload or {}
+        dicts = payload.get("messages") or []
+        if not dicts:
+            return
+        await asyncio.to_thread(
+            self._append_archive_sync,
+            event.session_id,
+            payload.get("branch_id") or "root",
+            dicts,
+        )
+
+    # ===================== 保存/归档（公开，供入口写库与测试；运行时持久化走订阅者） =====================
     async def save(
         self,
         session_id: str,
@@ -110,14 +134,14 @@ class ContextStore:
         branch_id: str = "root",
         summary: str | None = None,
     ) -> None:
-        """兼容入口/测试：BaseMessage 列表落库（内部转可序列化 dict）"""
+        """兼容入口/测试：BaseMessage 列表写当前视图快照"""
         dicts = messages_to_dict(messages)
         await asyncio.to_thread(
             self._save_snapshot_sync, session_id, dicts, session_ctx, branch_id, summary
         )
 
     async def load(self, session_id: str, branch_id: str = "root") -> list[BaseMessage] | None:
-        """别名：加载指定分支历史；会话不存在返回 None"""
+        """别名：加载指定分支当前视图历史；会话不存在返回 None"""
         return await self.load_branch(session_id, branch_id)
 
     def _save_snapshot_sync(
@@ -128,7 +152,7 @@ class ContextStore:
         branch_id: str,
         summary: str | None,
     ) -> None:
-        """快照落库：dicts 为 messages_to_dict 结果，直接按序写该分支消息"""
+        """视图快照落库：覆盖 messages 表（当前视图），不碰 archive（增量归档由 MESSAGES_ARCHIVED 负责）"""
         now = time.time()
         user_id = (session_ctx or {}).get("user_id", "")
         tenant_id = (session_ctx or {}).get("tenant_id", "")
@@ -138,8 +162,7 @@ class ContextStore:
                 """INSERT INTO sessions(session_id, user_id, tenant_id, title, summary, status, created_at, updated_at)
                    VALUES(?,?,?,?,'active',?,?)
                    ON CONFLICT(session_id) DO UPDATE SET
-                     user_id=excluded.user_id,
-                     tenant_id=excluded.tenant_id,
+                     user_id=excluded.user_id, tenant_id=excluded.tenant_id,
                      summary=CASE WHEN excluded.summary<>'' THEN excluded.summary ELSE sessions.summary END,
                      updated_at=excluded.updated_at""",
                 (session_id, user_id, tenant_id, summary, now, now),
@@ -154,23 +177,33 @@ class ContextStore:
                 "DELETE FROM messages WHERE session_id=? AND branch_id=?", (session_id, branch_id)
             )
             conn.executemany(
-                "INSERT INTO messages(session_id, branch_id, seq, turn_id, role, payload, archived) VALUES(?,?,?,?,?,?,0)",
+                "INSERT INTO messages(session_id, branch_id, seq, role, payload) VALUES(?,?,?,?,?)",
                 [
-                    (session_id, branch_id, i, 0, d.get("type", ""), json.dumps(d, ensure_ascii=False), 0)
+                    (session_id, branch_id, i, d.get("type", ""), json.dumps(d, ensure_ascii=False))
+                    for i, d in enumerate(dicts)
+                ],
+            )
+
+    def _append_archive_sync(self, session_id: str, branch_id: str, dicts: list[dict]) -> None:
+        """追加归档：append-only，仅写不删；压缩改写视图不影响全量历史"""
+        now = time.time()
+        with sqlite3.connect(self._db_path) as conn:
+            conn.executemany(
+                "INSERT INTO message_archive(session_id, branch_id, seq, role, payload, created_at) VALUES(?,?,?,?,?,?)",
+                [
+                    (session_id, branch_id, i, d.get("type", ""), json.dumps(d, ensure_ascii=False), now)
                     for i, d in enumerate(dicts)
                 ],
             )
 
     # ===================== 读取（入口恢复用） =====================
     async def load_branch(self, session_id: str, branch_id: str = "root") -> list[BaseMessage] | None:
-        """快照式：统一读本分支全量；会话不存在返回 None"""
+        """读当前视图（压缩后=System+Human摘要+最近keep轮），注入会话；会话不存在返回 None"""
         return await asyncio.to_thread(self._load_branch_sync, session_id, branch_id)
 
     def _load_branch_sync(self, session_id, branch_id):
         with sqlite3.connect(self._db_path) as conn:
-            exists = conn.execute(
-                "SELECT 1 FROM sessions WHERE session_id=?", (session_id,)
-            ).fetchone()
+            exists = conn.execute("SELECT 1 FROM sessions WHERE session_id=?", (session_id,)).fetchone()
             if exists is None:
                 return None
             if branch_id != "root":
@@ -181,6 +214,20 @@ class ContextStore:
                     raise ValueError(f"分支 '{branch_id}' 不存在或不属于会话 '{session_id}'")
             rows = conn.execute(
                 "SELECT payload FROM messages WHERE session_id=? AND branch_id=? ORDER BY seq",
+                (session_id, branch_id),
+            ).fetchall()
+        if not rows:
+            return []
+        return messages_from_dict([json.loads(r[0]) for r in rows])
+
+    async def load_full_history(self, session_id: str, branch_id: str = "root") -> list[BaseMessage]:
+        """从归档表重建全量历史（append-only，含被压缩移出的早期轮）；无则返回空列表"""
+        return await asyncio.to_thread(self._load_full_history_sync, session_id, branch_id)
+
+    def _load_full_history_sync(self, session_id, branch_id):
+        with sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT payload FROM message_archive WHERE session_id=? AND branch_id=? ORDER BY id",
                 (session_id, branch_id),
             ).fetchall()
         if not rows:
@@ -230,9 +277,7 @@ class ContextStore:
 
     def _load_summary_sync(self, session_id):
         with sqlite3.connect(self._db_path) as conn:
-            row = conn.execute(
-                "SELECT summary FROM sessions WHERE session_id=?", (session_id,)
-            ).fetchone()
+            row = conn.execute("SELECT summary FROM sessions WHERE session_id=?", (session_id,)).fetchone()
         if row is None or not row[0]:
             return None
         return row[0]
