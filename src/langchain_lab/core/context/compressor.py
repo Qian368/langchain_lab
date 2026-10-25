@@ -8,11 +8,12 @@
   压缩指令；与主对话历史前缀一致，可命中前置 KV 缓存
 - 摘要消息角色：HumanMessage（additional_kwargs.meta=summary），固定视图第 2 条；只拼一条、迭代覆盖
 - 压缩指令文本由 runtime.yaml compression.summarize_prompt 配置注入（None 用内置默认）
+- 事件通道：依赖 EventChannel（Port）；只发布 CONTEXT_COMPRESSED（通配，前端/持久化都收），不订阅
 """
 from langchain_core.messages import BaseMessage, HumanMessage
 
 from langchain_lab.core.context.views import build_display_context, build_llm_context, split_turns
-from langchain_lab.core.event_bus import EventBus
+from langchain_lab.core.event_bus import EventChannel
 from langchain_lab.core.events import Event, EventType
 
 _DEFAULT_SUMMARIZE_PROMPT = (
@@ -28,7 +29,7 @@ class SessionCompressor:
         self,
         summarize_llm,
         keep_recent_turns: int,
-        bus: EventBus,
+        bus: EventChannel,
         session_id: str,
         summarize_prompt: str | None = None,
     ):

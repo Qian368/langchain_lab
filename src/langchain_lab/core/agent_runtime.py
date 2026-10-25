@@ -1,7 +1,7 @@
 """AgentRuntime：后端运行时宿主（多会话实例池 + 生命周期 + 统一操作面 + 全局配置注入）
 
 三层职责边界（接入层 / AgentRuntime / ChatSession）：
-- AgentRuntime 是【唯一的真正运行时】：持有实例池 dict[session_id->ChatSession]、bus、store、llm/tools、全局配置
+- AgentRuntime 是【唯一的真正运行时】：持有实例池 dict[session_id->ChatSession]、channel、store、llm/tools、全局配置
 - 职责：生命周期(create/resume/close/delete)；统一操作面 send_message/handle_command/request_compress；
         依赖组装 + 全局配置注入（ChatSession 与接入层都不读配置，只从 runtime 拿注入值）；多会话隔离并发
 - 不持有：渲染逻辑、终端/HTTP 适配（exp9 终端 与 未来 FastAPI 都只调本类）
@@ -9,6 +9,7 @@
 - 指令面与消息面分开：消息走 send_message(USER_MESSAGE_SUBMITTED)；指令走 handle_command(SESSION_COMMAND)；
   压缩触发走 request_compress(COMPRESS_REQUESTED)。接入层解析/校验，runtime 只响应语义化事件。
 - 系统提示词/运行上限/压缩配置：全部由 AgentRuntime 从全局配置加载并注入，前端不支持自定义
+- 事件通道：持有 EventChannel（默认 EventBus 内存实现）；close 走 channel.close()（flush+清空订阅），停机语义统一
 """
 import asyncio
 import uuid
@@ -17,7 +18,7 @@ from langchain_lab.core.agent_session import ChatSession
 from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.context.compressor import SessionCompressor
 from langchain_lab.core.context.context_store import ContextStore
-from langchain_lab.core.event_bus import EventBus
+from langchain_lab.core.event_bus import EventBus, EventChannel
 from langchain_lab.core.events import Event, EventType
 from langchain_lab.core.llm.llm import build_llm, get_llm
 from langchain_lab.core.tools.tool_disclosure import get_init_tools
@@ -35,7 +36,7 @@ class AgentRuntime:
         self._comp_cfg = self._cfg.runtime.compression
         self._keep_recent_turns = self._comp_cfg.keep_recent_turns
         self._db_path = str(db_path or self._agent_cfg.session_db_path)
-        self._bus = EventBus()
+        self._bus: EventChannel = EventBus()
         self._store = ContextStore(self._db_path)
         self._store.subscribe_to_bus(self._bus)  # 持久化订阅者（归档/压缩/作废落库）
         self._llm = None
@@ -50,7 +51,7 @@ class AgentRuntime:
 
     # —— 总线/存储暴露（供接入层订阅事件流 / 选会话读存储）——
     @property
-    def bus(self) -> EventBus:
+    def bus(self) -> EventChannel:
         return self._bus
 
     @property
@@ -103,11 +104,11 @@ class AgentRuntime:
         self._require(session_id)
         self._bus.publish(Event(EventType.COMPRESS_REQUESTED, session_id, {"force": force, "keep": keep}))
 
-    # —— 关闭（停机语义：关全部会话 + flush + 关 MCP 长连接）——
+    # —— 关闭（停机语义：关全部会话 + channel.close + 关 MCP 长连接）——
     async def close(self) -> None:
         for chat in self._sessions.values():
             await chat.close()
-        await self._bus.flush()
+        await self._bus.close()  # flush 后台任务 + 清空订阅（停机语义，统一走 channel）
         from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
         await _session_mgr.clear_all()
 
