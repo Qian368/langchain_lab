@@ -1,6 +1,6 @@
 """ChatSession：消息总线上的 Agent 会话 actor（面向网络服务化，事件驱动）
 
-- 输入事件化：订阅 USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED / SESSION_COMMAND，按 session_id 过滤
+- 输入事件化：定向订阅 USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED / SESSION_COMMAND（session_id 定向，O(1) 投递）
 - 不解析用户输入：指令的识别与合法性校验由客户端/适配器完成，转成语义化事件后发布；运行时只响应事件
 - 控制钩子（AgentHooks）：pre_user_message / post_llm / post_tool 三个同步可干预埋点，默认 None
 - 单源消息：运行时只维护一份 _messages（即当前视图）；每轮新消息 append 累积，
@@ -17,6 +17,7 @@
   条件化注入 meta='rerun' SystemMessage（仅当该轮有工具调用；加在副本，不持久化/不归档/不恢复），
   重新生成回答并增量归档；旧回答发 MESSAGE_SUPERSEDED 由 store 软删（前端只看到新回答）
 - 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入；不碰 MCP 连接
+- 事件通道抽象：依赖 EventChannel（Port），不感知底层是内存总线还是 MQ
 """
 import asyncio
 import inspect
@@ -36,7 +37,7 @@ from langchain.tools import BaseTool
 
 from langchain_lab.core.agent_hooks import AgentHooks
 from langchain_lab.core.context.compressor import SessionCompressor
-from langchain_lab.core.event_bus import EventBus
+from langchain_lab.core.event_bus import EventChannel
 from langchain_lab.core.events import Event, EventType
 from langchain_lab.core.tools.tool_disclosure import get_disclosure_tools
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
@@ -49,7 +50,7 @@ class ChatSession:
         self,
         session_id: str,
         session_ctx: dict,
-        bus: EventBus,
+        bus: EventChannel,
         llm,
         tools: list[BaseTool],  # 全量工具集（入口构建后注入）
         compressor: SessionCompressor | None = None,  # 可选，上下文压缩
@@ -89,10 +90,10 @@ class ChatSession:
         self._session_renamer = session_renamer
         self._branch_renamer = branch_renamer
         self._compress_lock = asyncio.Lock()  # 压缩串行化（自动/手动并发不竞态）
-        # 订阅输入事件（网络服务化：输入适配器 publish，本会话响应；按 session_id 隔离）
-        bus.subscribe(EventType.USER_MESSAGE_SUBMITTED, self._on_user_message)
-        bus.subscribe(EventType.COMPRESS_REQUESTED, self._on_compress_requested)
-        bus.subscribe(EventType.SESSION_COMMAND, self._on_command)
+        # 订阅输入事件（定向订阅自己的 session_id，O(1) 投递，不被其他会话事件触发）
+        bus.subscribe(self._on_user_message, EventType.USER_MESSAGE_SUBMITTED, session_id=self._session_id)
+        bus.subscribe(self._on_compress_requested, EventType.COMPRESS_REQUESTED, session_id=self._session_id)
+        bus.subscribe(self._on_command, EventType.SESSION_COMMAND, session_id=self._session_id)
 
     # —— 控制钩子执行器（统一返回值语义）——
     @staticmethod
@@ -105,18 +106,14 @@ class ChatSession:
             result = await result
         return arg if result is None else result
 
-    # —— 输入事件（async handler，由 event_bus 后台调度）——
+    # —— 输入事件（async handler，由通道后台调度；定向订阅已保证是本站会话事件）——
     def _on_user_message(self, event: Event):
-        """订阅普通用户消息（适配器已确认非指令）：返回协程由总线后台执行一轮"""
-        if event.session_id != self._session_id:
-            return None
+        """订阅普通用户消息（适配器已确认非指令）：返回协程由通道后台执行一轮"""
         content = str((event.payload or {}).get("content", ""))
         return self._handle_turn(content)
 
     def _on_compress_requested(self, event: Event):
         """订阅压缩触发：自动(force=False)或前端手动(force=True) → 异步生成摘要 + 重建视图"""
-        if event.session_id != self._session_id:
-            return None
         if self._compressor is None:
             return None
         return self._do_compress(event)
@@ -148,8 +145,6 @@ class ChatSession:
         regenerate 为独立路径（自带 turn 边界/归档/作废/flush），不从 _handle_command_event 的通用 try 走，
         避免与通用控制指令的双重 turn 边界与 flush。
         """
-        if event.session_id != self._session_id:
-            return None
         payload = event.payload or {}
         if payload.get("action") == "regenerate":
             return self._do_regenerate()
@@ -478,7 +473,8 @@ class ChatSession:
             # —— 控制钩子② post_llm：LLM 合法输出校验/替换（None=原样，非None=替换，raise=拒绝）——
             full_chunk = await self._run_hook(self._hooks.post_llm, full_chunk)
             self._messages.append(full_chunk)
-            self._emit(EventType.ASSISTANT_MESSAGE_EMITTED, payload=full_chunk)
+            # 完整消息事件：payload 用 messages_to_dict（JSON 可序列化，MQ 契约）；展示层看流式+状态，不依赖此 payload 内容
+            self._emit(EventType.ASSISTANT_MESSAGE_EMITTED, payload=messages_to_dict(full_chunk))
 
             # —— 上限终止：LLM 收尾轮多一次自增，工具计数顶格停在上限 ——
             if llm_loop_count > self._max_llm_loop or tool_call_count >= self._max_tool_calls:
