@@ -2,14 +2,15 @@
 
 架构边界（事件驱动 / 订阅者化 / 解析前移 / 单一真相源 / 树形会话）：
 - 输入事件化：终端适配器读输入 → 【适配器层解析+校验】→ 转事件（指令或普通消息）→ publish → ChatSession 订阅响应
-- 指令解析不放在运行时：适配器把 :branch/:branches/:switch/:compress/:delete/:rename 分类校验后转为
+- 指令解析不放在运行时：适配器把 :branch/:branches/:switch/:compress/:delete/:rename/:rerun 分类校验后转为
   SESSION_COMMAND / COMPRESS_REQUESTED 事件，普通输入转 USER_MESSAGE_SUBMITTED
 - 输出事件化：ChatSession 发布 STREAM/TOOL/ASSISTANT/SESSION 等事件
-- 持久化订阅者：ContextStore.subscribe_to_bus 订阅增量归档/压缩结果/摘要进归档落库（archive 单一真相源）
+- 持久化订阅者：ContextStore.subscribe_to_bus 订阅增量归档/压缩结果/摘要进归档/重跑作废落库（archive 单一真相源）
 - 展示订阅者：终端渲染订阅者【内联本入口】（不复用独立 view 模块，exp9 即展示层）
 - 恢复：入口用 store.load_view（回溯完整历史 + 最近摘要 → build_llm_context）注入 ChatSession（KV 逐 token 一致）
 - 分支：store.create_branch 返回 (new_id, 拐点视图)（branch_history 回溯，支持压缩后/继承历史任意位置分叉）
 - 删除：store.delete_branch（级联软删子树）；删 root=删整个会话 → SESSION_DELETED 驱动退出；gc_purge 留手动/后台
+- 重跑：:rerun 重跑当前最后一条人类消息轮（复用该轮工具结果、条件化注解、新回答归档、旧回答作废）
 - 命名：新建会话/分支带 name（默认值）；:rename 改当前会话或分支名
 - 运行上限/库路径/默认提示词：按 config/runtime.yaml agent 配置注入
 - MCP 连接 clear_all() 在此 finally（服务停机语义，不放在 ChatSession 内）
@@ -64,6 +65,9 @@ def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
     if cmd in (":compress", "/compress"):
         keep = int(arg) if arg.isdigit() and int(arg) >= 1 else None
         return EventType.COMPRESS_REQUESTED, {"force": True, "keep": keep}
+    if cmd in (":rerun", "/rerun", ":regenerate"):
+        # 重跑当前最后一条人类消息轮（复用工具结果；适配器解析即触发）
+        return EventType.SESSION_COMMAND, {"action": "regenerate"}
     return None, None  # 普通消息
 
 
@@ -232,7 +236,7 @@ async def main() -> None:
 
     bus = EventBus()
     store = ContextStore(db_path=str(agent_cfg.session_db_path))
-    store.subscribe_to_bus(bus)  # 持久化订阅者（增量归档/压缩结果/摘要进归档）
+    store.subscribe_to_bus(bus)  # 持久化订阅者（增量归档/压缩结果/摘要进归档/重跑作废）
     renderer = _TerminalRenderer()  # 展示订阅者（内联 exp9）
 
     session_id, branch_id, history, summary, session_name = await _pick_session(
@@ -288,7 +292,7 @@ async def main() -> None:
     bus.subscribe(EventType.SESSION_DELETED, _on_deleted)
     renderer.info(
         "提示：分支  :branch <N> / :branches / :switch <id>；删除  :delete <id>（root=整会话）；"
-        "重命名  :rename <名>；手动压缩  :compress [保留轮数]"
+        "重命名  :rename <名>；重跑当前轮  :rerun；手动压缩  :compress [保留轮数]"
     )
 
     try:
@@ -306,7 +310,7 @@ async def main() -> None:
                         await asyncio.wait_for(compress_done.wait(), timeout=10)
                     except asyncio.TimeoutError:
                         renderer.info("无可压早期轮或压缩未完成")
-                else:  # SESSION_COMMAND
+                else:  # SESSION_COMMAND（含 :rerun 重跑，走 _do_regenerate，自带 AGENT_TURN_DONE）
                     done.clear()
                     bus.publish(Event(etype, session_id, payload))
                     await done.wait()
