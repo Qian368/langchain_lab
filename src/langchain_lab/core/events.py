@@ -6,9 +6,10 @@
 - 轮次边界：AGENT_TURN_START / DONE（一次输入的处理开始/结束，供驱动等待+前端进度）
 - 过程事件：逐片/即时，给展示（流式打字、工具进度、用户回显）
 - 完整事件：累积完成，给持久化/完整语义（ASSISTANT_MESSAGE_EMITTED / TURN_COMPLETE）
-- 归档：MESSAGES_ARCHIVED（每轮新增真实消息增量落库）+ SUMMARY_ARCHIVED（摘要消息按分支归档）
+- 归档：MESSAGES_ARCHIVED（每轮新增真实消息增量落库）+ SUMMARY_ARCHIVED（摘要按分支归档）
+- 作废：MESSAGE_SUPERSEDED（重跑作废旧回答，store 软删 archive 中对应行）
 - 状态快照：SESSION_STATE_UPDATED（当前视图快照，事件溯源）
-- 压缩：COMPRESS_REQUESTED（触发，force/keep）+ CONTEXT_COMPRESSED（结果，forced 标记，更新会话级 summary）
+- 压缩：COMPRESS_REQUESTED（触发，force/keep）+ CONTEXT_COMPRESSED（结果，forced 标记）
 - 错误：ERROR_OCCURRED
 """
 from dataclasses import dataclass, field
@@ -45,6 +46,8 @@ class EventType(StrEnum):
     # —— 归档：每轮增量落库 + 摘要消息按分支归档（append-only）——
     MESSAGES_ARCHIVED = "messages_archived"
     SUMMARY_ARCHIVED = "summary_archived"  # 摘要消息归档（带 branch_id，落 archive kind=summary；由 ChatSession 携带当前分支发出）
+    # —— 作废：重跑作废旧回答（store 软删 archive 中该分支最后一条匹配的 AI 消息）——
+    MESSAGE_SUPERSEDED = "message_superseded"  # payload {branch_id, superseded_content}
     # —— 状态快照（当前视图，事件溯源核心）——
     SESSION_STATE_UPDATED = "session_state_updated"
     # —— 上下文压缩：触发请求 + 完成结果（更新会话级 summary 文本）——
