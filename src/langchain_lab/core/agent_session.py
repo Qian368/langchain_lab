@@ -13,6 +13,9 @@
 - 分支：store 从 archive 构建拐点视图（System + 前 point 轮真实消息，支持压缩后从历史轮次分叉），
   由 branch_creator 回调返回 (new_id, point_view)；运行时不碰持久化实现
 - 删除/重命名：走注入回调（branch_deleter/session_renamer/branch_renamer），运行时只响应语义化事件
+- 重跑（regenerate）：只允许当前最后一条人类消息对应轮。复用该轮已有工具结果（不重放副作用），
+  条件化注入 meta='rerun' SystemMessage（仅当该轮有工具调用；加在副本，不持久化/不归档/不恢复），
+  重新生成回答并增量归档；旧回答发 MESSAGE_SUPERSEDED 由 store 软删（前端只看到新回答）
 - 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入；不碰 MCP 连接
 """
 import asyncio
@@ -140,9 +143,16 @@ class ChatSession:
                 self._emit_session_state()
 
     def _on_command(self, event: Event):
-        """订阅控制指令事件（适配器已解析+校验，运行时只按 action 响应）"""
+        """订阅控制指令事件（适配器已解析+校验，运行时只按 action 响应）
+
+        regenerate 为独立路径（自带 turn 边界/归档/作废/flush），不从 _handle_command_event 的通用 try 走，
+        避免与通用控制指令的双重 turn 边界与 flush。
+        """
         if event.session_id != self._session_id:
             return None
+        payload = event.payload or {}
+        if payload.get("action") == "regenerate":
+            return self._do_regenerate()
         return self._handle_command_event(event)
 
     async def _handle_command_event(self, event: Event) -> None:
@@ -275,6 +285,70 @@ class ChatSession:
             await self._branch_renamer(self._branch_id, name)
             self._notice(f"分支 {self._branch_id} 已重命名为「{name}」")
 
+    # —— 重跑：只允许当前最后一条人类消息对应轮，复用工具结果，条件化注解，新回答归档、旧回答作废 ——
+    async def _do_regenerate(self) -> None:
+        """重跑当前最后一条人类消息对应轮：
+
+        - 复用该轮已有工具结果（ToolMessage 留在上下文作为已发生事实，不重放副作用）
+        - 条件化注解：仅当该轮有工具调用时，注入 meta='rerun' SystemMessage（临时加在副本，
+          不持久化、不进 _messages、不归档、不恢复）；无工具调用不注入
+        - 新回答 append _messages 并增量归档；旧回答发 MESSAGE_SUPERSEDED 由 store 软删（前端只看到新回答）
+        - 自带 turn 边界/归档/作废/flush，独立于 _handle_command_event（避免双重 turn 边界）
+        """
+        human_idxs = [
+            i
+            for i, m in enumerate(self._messages)
+            if isinstance(m, HumanMessage) and m.additional_kwargs.get("meta") != "summary"
+        ]
+        if not human_idxs:
+            self._notice("没有可重跑的轮次（暂无用户消息）")
+            return
+        h_idx = human_idxs[-1]  # 只允许最后一条人类消息对应轮
+        tail = self._messages[h_idx + 1 :]
+        tool_results = [m for m in tail if isinstance(m, ToolMessage)]
+        old_answer = [m for m in tail if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)]
+        # 复用该轮工具结果、裁掉旧回答 → 重跑基底（h_n + tool_results），旧回答不入视图
+        base_len = h_idx + 1 + len(tool_results)
+        self._messages = self._messages[: h_idx + 1] + tool_results
+        # 条件化注解：仅该轮有工具调用时注入（副本临时，不持久化）
+        extra: list[SystemMessage] | None = None
+        if tool_results:
+            extra = [
+                SystemMessage(
+                    content=(
+                        "这是一次对上一轮回答的重跑。该轮已执行的工具调用及其结果已在上文上下文中。"
+                        "请优先基于已有工具结果给出新的最终回答；若确实需要新的外部信息，才调用工具，"
+                        "避免重复调用已经执行过且结果仍有效的工具。"
+                    ),
+                    additional_kwargs={"meta": "rerun"},
+                )
+            ]
+        self._emit(EventType.AGENT_TURN_START)
+        try:
+            visible_tools = await get_disclosure_tools(self._session_ctx, self._messages)
+            llm_with_tools = self._llm.bind_tools(tools=visible_tools)
+            await self._agent_loop(llm_with_tools=llm_with_tools, injected_extra=extra)
+            # 增量归档：本轮重跑新增的真实消息（base 之后的新回答；已归档的 h_n/复用工具结果不重复落库）
+            self._archive_new_messages(base_len)
+            # 作废旧回答：store 订阅 MESSAGE_SUPERSEDED 软删 archive 中该分支最后一条匹配的 AI 消息
+            for m in old_answer:
+                self._emit(
+                    EventType.MESSAGE_SUPERSEDED,
+                    payload={"branch_id": self._branch_id, "superseded_content": m.content},
+                )
+            self._emit_session_state()
+            self._emit(
+                EventType.TURN_COMPLETE,
+                payload={"branch_id": self._branch_id, "summary": self._summary, "regenerated": True},
+            )
+        except Exception as exc:  # noqa: BLE001 - 面向网络服务化，运行时异常必须抛给订阅者
+            self._emit(EventType.ERROR_OCCURRED, payload={"error": repr(exc), "phase": "regenerate"})
+        finally:
+            self._emit(EventType.AGENT_TURN_DONE)
+            # 后置自动压缩触发（异步，不阻塞对话）
+            self._emit(EventType.COMPRESS_REQUESTED, payload={"force": False})
+            await self._bus.flush()
+
     # —— 生命周期 ——
     async def start(self, resumed: bool = False) -> None:
         """会话开始：新建发 SESSION_CREATED；恢复（入口已注入 history）发 SESSION_RESUMED"""
@@ -354,8 +428,12 @@ class ChatSession:
         """统一发布事件，session_id 自动填充（多会话隔离基础）；event_id 由 Event 自动生成（幂等去重）"""
         self._bus.publish(Event(type=event_type, session_id=self._session_id, payload=payload))
 
-    async def _agent_loop(self, llm_with_tools) -> None:
-        """单次对话循环（搬 exp3 _single_chat_loop，展示全部 emit）"""
+    async def _agent_loop(self, llm_with_tools, injected_extra: list[BaseMessage] | None = None) -> None:
+        """单次对话循环（搬 exp3 _single_chat_loop，展示全部 emit）
+
+        injected_extra：重跑等场景的临时注入消息（如 meta='rerun' 注解），加在副本、不进 _messages，
+        不持久化、不归档、不恢复；仅本轮 LLM 可见。
+        """
         tool_call_count = 0
         llm_loop_count = 0
 
@@ -374,12 +452,14 @@ class ChatSession:
                     additional_kwargs={"meta": "tool_call_break"},
                 )
 
-            # 基底用当前视图（_messages 即视图），上限注入加在副本
+            # 基底用当前视图（_messages 即视图），上限注入 + 临时注入（重跑注解）都加在副本
             current_messages = self._messages.copy()
             if injected_llm_limit_msg is not None:
                 current_messages.append(injected_llm_limit_msg)
             if injected_tool_limit_msg is not None:
                 current_messages.append(injected_tool_limit_msg)
+            if injected_extra:
+                current_messages.extend(injected_extra)
 
             llm_loop_count += 1
 
