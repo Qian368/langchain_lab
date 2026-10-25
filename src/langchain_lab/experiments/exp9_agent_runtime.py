@@ -1,39 +1,24 @@
-"""实验9：事件驱动 Agent 运行时入口（消息总线化，面向网络服务化，不动 exp3）
+"""实验9：事件驱动 Agent 运行时终端接入层（伪前端，不动 exp3）
 
-架构边界（事件驱动 / 订阅者化 / 解析前移 / 单一真相源 / 树形会话）：
-- 输入事件化：终端适配器读输入 → 【适配器层解析+校验】→ 转事件（指令或普通消息）→ publish → ChatSession 订阅响应
-- 指令解析不放在运行时：适配器把 :branch/:branches/:switch/:compress/:delete/:rename/:rerun 分类校验后转为
-  SESSION_COMMAND / COMPRESS_REQUESTED 事件，普通输入转 USER_MESSAGE_SUBMITTED
-- 输出事件化：ChatSession 发布 STREAM/TOOL/ASSISTANT/SESSION 等事件
-- 持久化订阅者：ContextStore.subscribe_to_bus 订阅增量归档/压缩结果/摘要进归档/重跑作废落库（archive 单一真相源）
-- 展示订阅者：终端渲染订阅者【内联本入口】（不复用独立 view 模块，exp9 即展示层）
-- 恢复：入口用 store.load_view（回溯完整历史 + 最近摘要 → build_llm_context）注入 ChatSession（KV 逐 token 一致）
-- 分支：store.create_branch 返回 (new_id, 拐点视图)（branch_history 回溯，支持压缩后/继承历史任意位置分叉）
-- 删除：store.delete_branch（级联软删子树）；删 root=删整个会话 → SESSION_DELETED 驱动退出；gc_purge 留手动/后台
-- 重跑：:rerun 重跑当前最后一条人类消息轮（复用该轮工具结果、条件化注解、新回答归档、旧回答作废）
-- 命名：新建会话/分支带 name（默认值）；:rename 改当前会话或分支名
-- 运行上限/库路径/默认提示词：按 config/runtime.yaml agent 配置注入
-- MCP 连接 clear_all() 在此 finally（服务停机语义，不放在 ChatSession 内）
+三层边界（接入层 / AgentRuntime / ChatSession）：
+- 【接入层职责】身份与会话选择(调 runtime) · 指令面/消息面分类(终端解析) · 订阅事件流渲染 · 输入交互
+- 不 new ChatSession · 不组装 store/llm/compressor · 不读全局配置（全部由 AgentRuntime 宿主承担）
+- 指令解析在接入层：:branch/:branches/:switch/:compress/:delete/:rename/:rerun 分类后转事件（走 runtime.handle_*）
+- 持久化订阅者 ContextStore 由 AgentRuntime 组装并 subscribe，接入层只从 runtime 拿 bus 订阅事件流展示
+- MCP 连接 clear_all 在 AgentRuntime.close()（服务停机语义，不在 ChatSession 内）
+- 系统提示词不再前端自定义，由后端全局配置加载（runtime 注入）
 """
 import asyncio
-import uuid
 
-from langchain_lab.core.agent_session import ChatSession
-from langchain_lab.core.config.config_core import get_config
-from langchain_lab.core.context.compressor import SessionCompressor
-from langchain_lab.core.context.context_store import ContextStore
-from langchain_lab.core.event_bus import EventBus
+from langchain_lab.core.agent_runtime import AgentRuntime
 from langchain_lab.core.events import Event, EventType
-from langchain_lab.core.llm.llm import build_llm, get_llm
-from langchain_lab.core.tools.tool_disclosure import get_init_tools
-from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
 from langchain_lab.util.prompt_style import Printer
 
 _DEFAULT_SESSION_NAME = "新会话"
 
 
 def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
-    """终端适配器解析输入（指令解析在适配器层，运行时只响应事件）
+    """终端接入层解析输入（指令面/消息面分类；指令解析在接入层，运行时只响应事件）
 
     返回 (event_type, payload)：
     - 识别到指令 → (对应事件类型, payload)
@@ -66,13 +51,13 @@ def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
         keep = int(arg) if arg.isdigit() and int(arg) >= 1 else None
         return EventType.COMPRESS_REQUESTED, {"force": True, "keep": keep}
     if cmd in (":rerun", "/rerun", ":regenerate"):
-        # 重跑当前最后一条人类消息轮（复用工具结果；适配器解析即触发）
+        # 重跑当前最后一条人类消息轮（复用工具结果；接入层解析即触发）
         return EventType.SESSION_COMMAND, {"action": "regenerate"}
     return None, None  # 普通消息
 
 
 class _TerminalRenderer:
-    """终端渲染订阅者（内联 exp9：展示层归入口，不复用独立 view 模块）
+    """终端渲染订阅者（内联 exp9：展示层归接入层，不复用独立 view 模块）
 
     - 订阅展示类事件，按 session_id 过滤渲染（多会话隔离基础）
     - 输入交互收进终端（prompt_async）；会话内系统提示经 SESSION_NOTICE 渲染
@@ -100,7 +85,7 @@ class _TerminalRenderer:
         self._session_id = ""
         self._expect_reply_start = True  # 状态机：下一轮答复前先打"模型答复>"标签
 
-    def bind(self, bus: EventBus, session_id: str) -> None:
+    def bind(self, bus, session_id: str) -> None:
         """注册为订阅者；只渲染本会话的事件（多会话隔离）"""
         self._session_id = session_id
         for et in self._DISPLAY_EVENTS:
@@ -182,94 +167,36 @@ class _TerminalRenderer:
         self._printer.warning(f"[运行时错误 @{p.get('phase', '?')}] {p.get('error', '')}")
 
 
-async def _pick_session(
-    printer: Printer, renderer: _TerminalRenderer, store: ContextStore, session_ctx: dict,
-    keep_recent_turns: int,
-) -> tuple[str, str, list | None, str | None, str]:
-    """选会话：列出已有会话，编号恢复（回溯视图）或新建；返回 (session_id, branch_id, history, summary, name)"""
-    sessions = await store.list_sessions(
-        session_ctx.get("user_id", ""), session_ctx.get("tenant_id", "")
-    )
+async def main() -> None:
+    runtime = AgentRuntime()  # 后端宿主：身份/配置/依赖组装/store 全在内部，接入层不碰
+    await runtime.ainit()
+    bus = runtime.bus
+    renderer = _TerminalRenderer()
+
+    # —— 身份/会话选择（调 runtime，不 new ChatSession）——
+    sessions = await runtime.list_sessions()
+    chat = None
+    session_name = _DEFAULT_SESSION_NAME
+    resumed = False
     if sessions:
-        printer.info(f"已有 {len(sessions)} 个会话：")
+        renderer.info(f"已有 {len(sessions)} 个会话：")
         for i, s in enumerate(sessions, 1):
-            printer.output(f"  [{i}] {s['name'] or '(未命名)'}  · {s['session_id'][:8]}  · {s['status']}")
+            renderer.output(f"  [{i}] {s['name'] or '(未命名)'}  · {s['session_id'][:8]}  · {s['status']}")
         choice = (await renderer.prompt_async("输入编号恢复会话（回车新建）：\n> ")).strip()
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(sessions):
                 sid = sessions[idx - 1]["session_id"]
-                history = await store.load_view(sid, "root", keep_recent_turns)  # 回溯构建 llm 视图
-                summary = await store.load_summary(sid)
-                return sid, "root", history, summary, sessions[idx - 1]["name"]
-    name = (await renderer.prompt_async(f"输入会话名（回车默认「{_DEFAULT_SESSION_NAME}」）：\n> ")).strip()
-    return str(uuid.uuid4()), "root", None, None, name or _DEFAULT_SESSION_NAME
+                session_name = sessions[idx - 1]["name"] or session_name
+                chat = await runtime.resume_session(sid)
+                resumed = chat is not None
+    if chat is None:
+        name = (await renderer.prompt_async(f"输入会话名（回车默认「{_DEFAULT_SESSION_NAME}」）：\n> ")).strip()
+        session_name = name or _DEFAULT_SESSION_NAME
+        chat = await runtime.create_session(name=session_name)
 
-
-def _build_compressor(bus: EventBus, session_id: str) -> SessionCompressor | None:
-    comp_cfg = get_config().runtime.compression
-    if not comp_cfg.enabled:
-        return None
-    llm_cfg = get_config().llm
-    inst_name = comp_cfg.summarize_model or llm_cfg.default_instance
-    if not inst_name or inst_name not in llm_cfg.instances:
-        raise ValueError(f"压缩摘要模型实例 '{inst_name}' 未在 config/llm.yaml 中配置")
-    summarize_llm = build_llm(llm_cfg.instances[inst_name])
-    return SessionCompressor(
-        summarize_llm=summarize_llm,
-        keep_recent_turns=comp_cfg.keep_recent_turns,
-        summarize_prompt=comp_cfg.summarize_prompt,
-        bus=bus,
-        session_id=session_id,
-    )
-
-
-async def main() -> None:
-    agent_cfg = get_config().runtime.agent
-    session_ctx = get_config().project.session_ctx
-    keep_recent_turns = get_config().runtime.compression.keep_recent_turns
-    printer = Printer()
-    printer.reset_all_state()
-
-    llm = await asyncio.to_thread(get_llm)
-    all_tools = await get_init_tools(session_ctx)
-
-    bus = EventBus()
-    store = ContextStore(db_path=str(agent_cfg.session_db_path))
-    store.subscribe_to_bus(bus)  # 持久化订阅者（增量归档/压缩结果/摘要进归档/重跑作废）
-    renderer = _TerminalRenderer()  # 展示订阅者（内联 exp9）
-
-    session_id, branch_id, history, summary, session_name = await _pick_session(
-        printer, renderer, store, session_ctx, keep_recent_turns
-    )
+    session_id = chat._session_id
     renderer.bind(bus, session_id)
-
-    system_prompt = agent_cfg.default_system_prompt
-    is_new = history is None
-    if is_new:
-        system_prompt = (
-            await renderer.prompt_async("请输入你的系统提示词(shift + enter 换行，回车用默认)：\n> ")
-        ) or agent_cfg.default_system_prompt
-    # 注册会话：新建写入原始 system_prompt + name；恢复传 None 保留 store 已有（KV 前缀一致，不覆盖）
-    await store.ensure_session(
-        session_id, session_ctx,
-        None if not is_new else system_prompt,
-        session_name if is_new else None,
-    )
-
-    compressor = _build_compressor(bus, session_id)
-    chat = ChatSession(
-        session_id=session_id, session_ctx=session_ctx, bus=bus, llm=llm, tools=all_tools,
-        compressor=compressor, branch_id=branch_id, system_prompt=system_prompt,
-        max_llm_loop=agent_cfg.max_llm_loop, max_tool_calls=agent_cfg.max_tool_calls,
-        history=history, summary=summary,
-        branch_loader=lambda bid: store.load_view(session_id, bid, keep_recent_turns),
-        branch_lister=lambda: store.list_branches(session_id),
-        branch_creator=lambda parent, point: store.create_branch(session_id, parent, point),
-        branch_deleter=lambda bid: store.delete_branch(session_id, bid),
-        session_renamer=lambda n: store.rename_session(session_id, n),
-        branch_renamer=lambda bid, n: store.rename_branch(session_id, bid, n),
-    )
 
     done = asyncio.Event()
     compress_done = asyncio.Event()
@@ -296,7 +223,7 @@ async def main() -> None:
     )
 
     try:
-        await chat.start(resumed=history is not None)
+        await chat.start(resumed=resumed)
         while True:
             human_prompt = await renderer.prompt_async("请向你的助手发送消息(shift + enter 换行)：\n> ")
             if human_prompt == "0":
@@ -305,28 +232,26 @@ async def main() -> None:
             if etype is not None:
                 if etype == EventType.COMPRESS_REQUESTED:
                     compress_done.clear()
-                    bus.publish(Event(etype, session_id, payload))
+                    runtime.request_compress(session_id, force=True, keep=payload.get("keep"))
                     try:
                         await asyncio.wait_for(compress_done.wait(), timeout=10)
                     except asyncio.TimeoutError:
                         renderer.info("无可压早期轮或压缩未完成")
-                else:  # SESSION_COMMAND（含 :rerun 重跑，走 _do_regenerate，自带 AGENT_TURN_DONE）
+                else:  # SESSION_COMMAND（含 :rerun，走 _do_regenerate，自带 AGENT_TURN_DONE）
                     done.clear()
-                    bus.publish(Event(etype, session_id, payload))
+                    runtime.handle_command(session_id, payload["action"], payload)
                     await done.wait()
                     if session_deleted.is_set():  # 删了 root（整个会话）→ 退出
                         break
                 continue
-            if payload is not None:  # 像指令但非法 → 适配器层提示
+            if payload is not None:  # 像指令但非法 → 接入层提示
                 renderer.info(payload.get("error", "无法识别的指令"))
                 continue
             done.clear()
-            bus.publish(Event(EventType.USER_MESSAGE_SUBMITTED, session_id, {"content": human_prompt}))
+            runtime.send_message(session_id, human_prompt)
             await done.wait()
     finally:
-        await chat.close()
-        print("程序停机，开始关闭所有 MCP 长连接")
-        await _session_mgr.clear_all()
+        await runtime.close()  # 停机语义：关全部会话 + flush + 关 MCP 长连接
 
 
 if __name__ == "__main__":
