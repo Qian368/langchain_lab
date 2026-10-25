@@ -5,12 +5,14 @@
 - 不 new ChatSession · 不组装 store/llm/compressor · 不读全局配置（全部由 AgentRuntime 宿主承担）
 - 指令解析在接入层：:branch/:branches/:switch/:compress/:delete/:rename/:rerun 分类后转事件（走 runtime.handle_*）
 - 持久化订阅者 ContextStore 由 AgentRuntime 组装并 subscribe，接入层只从 runtime 拿 bus 订阅事件流展示
+- 事件订阅全部【定向投递】session_id（只收当前会话事件，O(1) 不放大）；接入层订阅自己绑定会话的事件
 - MCP 连接 clear_all 在 AgentRuntime.close()（服务停机语义，不在 ChatSession 内）
 - 系统提示词不再前端自定义，由后端全局配置加载（runtime 注入）
 """
 import asyncio
 
 from langchain_lab.core.agent_runtime import AgentRuntime
+from langchain_lab.core.event_bus import EventChannel
 from langchain_lab.core.events import Event, EventType
 from langchain_lab.util.prompt_style import Printer
 
@@ -59,7 +61,7 @@ def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
 class _TerminalRenderer:
     """终端渲染订阅者（内联 exp9：展示层归接入层，不复用独立 view 模块）
 
-    - 订阅展示类事件，按 session_id 过滤渲染（多会话隔离基础）
+    - 定向订阅绑定会话的事件（session_id），不被其他会话事件触发；多会话隔离基础
     - 输入交互收进终端（prompt_async）；会话内系统提示经 SESSION_NOTICE 渲染
     - 行为对拍：核心内容（流式/工具/终止/回显）与 exp3 一致
     """
@@ -85,11 +87,11 @@ class _TerminalRenderer:
         self._session_id = ""
         self._expect_reply_start = True  # 状态机：下一轮答复前先打"模型答复>"标签
 
-    def bind(self, bus, session_id: str) -> None:
-        """注册为订阅者；只渲染本会话的事件（多会话隔离）"""
+    def bind(self, bus: EventChannel, session_id: str) -> None:
+        """注册为订阅者：定向订阅本会话事件（O(1) 投递，不被其他会话触发）"""
         self._session_id = session_id
         for et in self._DISPLAY_EVENTS:
-            bus.subscribe(et, self._on_event)
+            bus.subscribe(self._on_event, et, session_id=session_id)
 
     async def prompt_async(self, text: str) -> str:
         return await self._printer.prompt_async(text, style_name=self._printer.style_name.MESSAGE)
@@ -101,8 +103,6 @@ class _TerminalRenderer:
         self._printer.output(text)
 
     def _on_event(self, event: Event) -> None:
-        if event.session_id != self._session_id:
-            return
         handler = {
             EventType.SESSION_CREATED: self._on_session_created,
             EventType.SESSION_RESUMED: self._on_session_resumed,
@@ -203,20 +203,18 @@ async def main() -> None:
     session_deleted = asyncio.Event()
 
     def _on_turn_done(e: Event) -> None:
-        if e.session_id == session_id:
-            done.set()
+        done.set()
 
     def _on_compressed(e: Event) -> None:
-        if e.session_id == session_id:
-            compress_done.set()
+        compress_done.set()
 
     def _on_deleted(e: Event) -> None:
-        if e.session_id == session_id:
-            session_deleted.set()
+        session_deleted.set()
 
-    bus.subscribe(EventType.AGENT_TURN_DONE, _on_turn_done)
-    bus.subscribe(EventType.CONTEXT_COMPRESSED, _on_compressed)
-    bus.subscribe(EventType.SESSION_DELETED, _on_deleted)
+    # 定向订阅当前会话（O(1) 投递，不放大）
+    bus.subscribe(_on_turn_done, EventType.AGENT_TURN_DONE, session_id=session_id)
+    bus.subscribe(_on_compressed, EventType.CONTEXT_COMPRESSED, session_id=session_id)
+    bus.subscribe(_on_deleted, EventType.SESSION_DELETED, session_id=session_id)
     renderer.info(
         "提示：分支  :branch <N> / :branches / :switch <id>；删除  :delete <id>（root=整会话）；"
         "重命名  :rename <名>；重跑当前轮  :rerun；手动压缩  :compress [保留轮数]"
@@ -251,7 +249,7 @@ async def main() -> None:
             runtime.send_message(session_id, human_prompt)
             await done.wait()
     finally:
-        await runtime.close()  # 停机语义：关全部会话 + flush + 关 MCP 长连接
+        await runtime.close()  # 停机语义：关全部会话 + channel.close + 关 MCP 长连接
 
 
 if __name__ == "__main__":
