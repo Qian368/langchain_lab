@@ -8,9 +8,11 @@
 - 【KV 一致】archive 用 messages_to_dict 无损序列化；恢复视图 = 回溯完整消息 + 最近摘要 → build_llm_context
   （同压缩时函数与输入，逐 token 一致，KV 前缀命中）。
 - 【两级删除】软删（级联子树 + 标记 archive，不物理删、不冲突）+ gc_purge（物理删不可达，彻底释放）。
+- 【作废】重跑（regenerate）时旧回答经 MESSAGE_SUPERSEDED 软删该分支最后一条匹配的 AI 消息，
+  archive 仍保留审计痕迹（deleted=1），前端/恢复只看到新回答。
 - 【幂等】事件带 event_id，archive UNIQUE(session_id,branch_id,event_id,seq) + INSERT OR IGNORE。
 - 订阅：MESSAGES_ARCHIVED（增量归档）/ SESSION_CLOSED（标关闭）/ CONTEXT_COMPRESSED（更新会话级 summary 文本）/
-  SUMMARY_ARCHIVED（摘要消息按分支落 archive，由 ChatSession 携带当前 branch_id 发出）。
+  SUMMARY_ARCHIVED（摘要消息按分支落 archive，由 ChatSession 携带当前 branch_id 发出）/ MESSAGE_SUPERSEDED（作废旧回答）。
 - 命名：sessions.name / branches.name（展示用，默认值、非唯一）。
 """
 import asyncio
@@ -62,7 +64,7 @@ class ContextStore:
                     role TEXT,
                     kind TEXT DEFAULT 'message', -- message / summary（摘要也进归档）
                     payload TEXT,
-                    deleted INTEGER DEFAULT 0,   -- 软删标记（1=已删除，gc 物理清理）
+                    deleted INTEGER DEFAULT 0,   -- 软删标记（1=已删除，gc 物理清理；重跑作废也走此标记）
                     created_at REAL,
                     UNIQUE(session_id, branch_id, event_id, seq)
                 );
@@ -82,11 +84,12 @@ class ContextStore:
 
     # ===================== 订阅者 =====================
     def subscribe_to_bus(self, bus: EventBus) -> None:
-        """注册持久化订阅者：增量归档 + 会话关闭 + 会话级 summary 更新 + 摘要消息按分支归档"""
+        """注册持久化订阅者：增量归档 + 会话关闭 + 会话级 summary 更新 + 摘要消息按分支归档 + 重跑作废"""
         bus.subscribe(EventType.MESSAGES_ARCHIVED, self._on_archived)
         bus.subscribe(EventType.SESSION_CLOSED, self._on_session_closed)
         bus.subscribe(EventType.CONTEXT_COMPRESSED, self._on_compressed)
         bus.subscribe(EventType.SUMMARY_ARCHIVED, self._on_summary_archived)
+        bus.subscribe(EventType.MESSAGE_SUPERSEDED, self._on_superseded)
 
     async def _on_archived(self, event: Event) -> None:
         """每轮增量归档（append-only）：本轮新增真实消息落 archive；event_id 幂等去重"""
@@ -128,6 +131,20 @@ class ContextStore:
             (event.payload or {}).get("branch_id") or "root",
             event.event_id,
             summary,
+        )
+
+    async def _on_superseded(self, event: Event) -> None:
+        """重跑作废旧回答：软删该分支 archive 中最后一条 role='ai' 且 content 匹配的 AI 消息。
+
+        由 ChatSession 重跑后发出（payload 带 branch_id + superseded_content）；旧回答保留审计痕迹（deleted=1），
+        前端/恢复（load_view 只读 deleted=0）只见新回答。content 匹配只作旧回答兜底定位（重跑极少触发，可接受）。
+        """
+        payload = event.payload or {}
+        content = payload.get("superseded_content")
+        if content is None:
+            return
+        await asyncio.to_thread(
+            self._supersede_sync, event.session_id, payload.get("branch_id") or "root", content
         )
 
     # ===================== 注册 / 归档 =====================
@@ -341,7 +358,7 @@ class ContextStore:
             bid = stack.pop()
             result.append(bid)
             for (child,) in conn.execute(
-                "SELECT branch_id FROM branches WHERE session_id=? AND parent_id=? AND status='active'",
+                "SELECT branch_id FROM sessions WHERE session_id=? AND parent_id=? AND status='active'",
                 (session_id, bid),
             ).fetchall():
                 stack.append(child)
@@ -459,3 +476,23 @@ class ContextStore:
             {"session_id": r[0], "name": r[1], "status": r[2], "created_at": r[3], "updated_at": r[4]}
             for r in rows
         ]
+
+    # ===================== 作废（重跑旧回答） =====================
+    def _supersede_sync(self, session_id, branch_id, content) -> None:
+        """软删该分支 archive 中最后一条 role='ai' 且 content 匹配的 AI 消息（deleted=1，审计保留）。
+
+        由 ChatSession 重跑后发 MESSAGE_SUPERSEDED 触发；content 匹配兜底定位旧回答，重跑低频可接受。
+        """
+        if content is None:
+            return
+        with sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT id, payload FROM message_archive WHERE session_id=? AND branch_id=? AND role='ai' AND kind='message' AND deleted=0 ORDER BY id DESC LIMIT 50",
+                (session_id, branch_id),
+            ).fetchall()
+            for row_id, payload in rows:
+                d = json.loads(payload)
+                data = d.get("data", {}) if isinstance(d, dict) else {}
+                if data.get("content") == content or d.get("content") == content:
+                    conn.execute("UPDATE message_archive SET deleted=1 WHERE id=?", (row_id,))
+                    return
