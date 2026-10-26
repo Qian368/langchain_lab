@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import InjectedToolArg, tool
 from pydantic import BaseModel, Field
 
-from langchain_lab.core.config._config import RAG_API_BASE
+from langchain_lab.core.config.config_core import get_config
 
 # from langchain_core.runnables import RunnableConfig
 
@@ -56,20 +56,6 @@ def test1_query_order(
     return f"这只是个示例订单查询工具。\n订单{order_no}查询完成，用户：{user_id}"
 
 
-# # 合并注入，内部解析
-# @tool
-# def test2_query_order(order_no: str, config: RunnableConfig) -> str:
-#     """
-#     查询当前用户的订单详情
-#     Args:
-#         order_no: 订单编号，格式为ORD_开头加数字
-#     """
-#     ctx = config.get("configurable", {})
-#     user_id = ctx["user_id"]
-#     tenant_id = ctx["tenant_id"]
-#     return f"这只是个示例订单查询工具。\n订单{order_no}查询完成，用户：{user_id}"
-
-
 @tool
 def local_retriever(query: str) -> str:
     """
@@ -108,7 +94,7 @@ async def rag_knowledge_search(
         # 异步版客户端
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(
-                f"{RAG_API_BASE}/query",
+                f"{get_config().rag.api.api_base}/query",  # 原硬编码 RAG_API_BASE 已收敛
                 # 构造请求参数注入查询 api
                 params={
                     "tenant_id": tenant_id,

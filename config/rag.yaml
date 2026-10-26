@@ -4,6 +4,9 @@ rag:
     api_base: "http://127.0.0.1:8000"
 
   mongo:
+    # 连接串用 ${VAR} 占位，真实值放 .env（MONGO_USER_URI / MONGO_ADMIN_URI），避免明文入库
+    user_uri: "${MONGO_USER_URI}"
+    admin_uri: "${MONGO_ADMIN_URI}"
     db_name: "knowledge_base"
     collection: "kb_documents"
 
@@ -18,3 +21,6 @@ rag:
     upload_dir: "./data/uploads"
     allowed_base_dirs:
       - "D:/notes"
+
+  embedding:
+    model: "../models/bge-small-zh-v1.5"

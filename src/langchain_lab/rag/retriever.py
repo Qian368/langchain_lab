@@ -15,6 +15,7 @@ from pathlib import Path
 import faiss
 import numpy as np
 
+from langchain_lab.core.config.config_core import get_config
 from langchain_lab.rag.embedding import get_embedding_model
 from langchain_lab.util.logger import LogName, setup_logger
 
@@ -182,8 +183,10 @@ class Retriever:
         logger.info(f"索引已保存到 {dir_path}")
 
     @classmethod
-    def load(cls, dir_path: str | Path, model_name: str = "../models/bge-small-zh-v1.5") -> "Retriever":
-        """从磁盘加载索引和文档"""
+    def load(cls, dir_path: str | Path, model_name: str | None = None) -> "Retriever":
+        """从磁盘加载索引和文档（模型名未传则用统一配置 rag.embedding.model）"""
+        if model_name is None:
+            model_name = get_config().rag.embedding.model
         dir_path = Path(dir_path)
 
         # 加载文档和配置

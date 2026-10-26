@@ -12,6 +12,8 @@ from langchain_lab.core.config.app_config import AppConfig
 from langchain_lab.core.config.app_schema.mcp_models import MCPSettings
 from langchain_lab.core.config.app_schema.project_models import ProjectSettings
 from langchain_lab.core.config.app_schema.rag_models import RagSettings
+from langchain_lab.core.config.app_schema.runtime_models import RuntimeSettings
+from langchain_lab.core.llm.llm_schema import LLMConfig
 
 
 class ConfigLoader(BaseSettings):
@@ -20,6 +22,8 @@ class ConfigLoader(BaseSettings):
             "config/rag.yaml",
             "config/project.yaml",
             "config/mcp.yaml",
+            "config/llm.yaml",
+            "config/runtime.yaml",
         ],
         env_file=".env",
         env_nested_delimiter="__",
@@ -29,6 +33,8 @@ class ConfigLoader(BaseSettings):
     project: ProjectSettings = Field(default_factory=ProjectSettings)
     rag: RagSettings = Field(default_factory=RagSettings)
     mcp: MCPSettings = Field(default_factory=MCPSettings)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
 
     @classmethod
     def settings_customise_sources(
@@ -48,10 +54,8 @@ class ConfigLoader(BaseSettings):
         elif isinstance(raw, str):
             file_list = [raw]
         elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
-            # 是列表/序列，转成字符串路径
             file_list = [str(item) for item in raw]
         else:
-            # raw 是单独的 Path / Traversable 单个对象
             file_list = [str(raw)]
 
         yaml_source = YamlConfigSettingsSource(
@@ -61,7 +65,6 @@ class ConfigLoader(BaseSettings):
         )
 
         # 优先级：init参数 > YAML > 系统环境变量 > .env > 密钥文件
-        # 如要“yaml < .env”，就把 yaml 放 env/dotenv 前面
         return (
             init_settings,
             yaml_source,
@@ -77,4 +80,6 @@ def load_config() -> AppConfig:
         project=config.project,
         rag=config.rag,
         mcp=config.mcp,
+        llm=config.llm,
+        runtime=config.runtime,
     )

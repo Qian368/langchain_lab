@@ -10,7 +10,7 @@ from bson import ObjectId
 from pymongo import MongoClient
 from pymongo.collection import Collection
 
-from langchain_lab.core.config._config import MONGO_COLLECTION, MONGO_DB, USER_MONGO_URI
+from langchain_lab.core.config.config_core import get_config
 
 
 class MongoDocumentStore:
@@ -32,10 +32,12 @@ class MongoDocumentStore:
     }
     """
 
-    def __init__(self, uri: str = USER_MONGO_URI, db_name: str = MONGO_DB):
-        self.client = MongoClient(uri)
-        self.db = self.client[db_name]
-        self.collection: Collection = self.db[MONGO_COLLECTION]
+    def __init__(self, uri: str | None = None, db_name: str | None = None, collection: str | None = None):
+        # 未显式传入则读统一配置 rag.mongo.*（原硬编码 USER_MONGO_URI/MONGO_DB/MONGO_COLLECTION 已收敛）
+        mongo_cfg = get_config().rag.mongo
+        self.client = MongoClient(uri or mongo_cfg.user_uri)
+        self.db = self.client[db_name or mongo_cfg.db_name]
+        self.collection: Collection = self.db[collection or mongo_cfg.collection]
 
     def insert_document(
         self,

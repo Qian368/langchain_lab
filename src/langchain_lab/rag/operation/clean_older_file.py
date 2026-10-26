@@ -1,7 +1,7 @@
 import time
 from pathlib import Path
 
-from langchain_lab.core.config._config import BACKUP_DIR, UPLOAD_DIR
+from langchain_lab.core.config.config_core import get_config
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.OPERATE)
@@ -23,7 +23,7 @@ def clean_older_dir(backup_dir: str | Path, keep_days: int = 30, dry_run: bool =
     cutoff = time.time() - keep_days * 86400
     deleted_count = 0
 
-    # 遍历目录下所有文件（不递归子文件夹，如需递归换成 rglob("*")）
+    # 遍历目录下所有文件（不递归子文件夹，如需递归换成 rglob("*"))
     for f in root.glob("*"):
         if not f.is_file():
             continue
@@ -44,5 +44,7 @@ if __name__ == "__main__":
     RETAIN_DAYS = 30
     DRY_RUN = False  # 先跑一次预览，确认无误再改成False
     # ==================================
-    clean_older_dir(BACKUP_DIR, keep_days=RETAIN_DAYS, dry_run=DRY_RUN)
-    clean_older_dir(UPLOAD_DIR, keep_days=RETAIN_DAYS, dry_run=DRY_RUN)
+    # 备份/上传目录已收敛到统一配置：project.backup.backup_dir / rag.file.upload_dir
+    cfg = get_config()
+    clean_older_dir(cfg.project.backup.backup_dir, keep_days=RETAIN_DAYS, dry_run=DRY_RUN)
+    clean_older_dir(cfg.rag.file.upload_dir, keep_days=RETAIN_DAYS, dry_run=DRY_RUN)

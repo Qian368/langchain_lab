@@ -1,3 +1,7 @@
+"""运维底层原语：Mongo 索引/备份/去重、SQLite 建表/索引、Chroma 探活。
+连接串/库名/路径已收敛到统一配置 get_config()（原 _config.py 硬编码已迁移）。
+"""
+
 import json
 import sqlite3
 from contextlib import suppress
@@ -12,7 +16,7 @@ from colorama import init
 from pymongo import MongoClient
 from pymongo.collection import Collection
 
-from langchain_lab.core.config._config import ADMIN_MONGO_URI, BACKUP_DIR, CHROMA_COLLECTION, CHROMA_PATH, META_DB_PATH, MONGO_COLLECTION, MONGO_DB
+from langchain_lab.core.config.config_core import get_config
 from langchain_lab.util.logger import LogName, setup_logger
 
 logger = setup_logger(LogName.OPERATE)
@@ -20,11 +24,12 @@ init(autoreset=True)
 
 
 class MongoOperation:
-    def __init__(self, uri: str = ADMIN_MONGO_URI, db_name: str = MONGO_DB):
+    def __init__(self, uri: str | None = None, db_name: str | None = None, collection: str | None = None):
         """Mongo底层运维操作类，仅提供存储原语，不实例化业务Service"""
-        self.client = MongoClient(uri)
-        self.db = self.client[db_name]
-        self.collection: Collection = self.db[MONGO_COLLECTION]
+        mongo_cfg = get_config().rag.mongo
+        self.client = MongoClient(uri or mongo_cfg.admin_uri)
+        self.db = self.client[db_name or mongo_cfg.db_name]
+        self.collection: Collection = self.db[collection or mongo_cfg.collection]
 
     def init_index(self):
         """
@@ -100,17 +105,19 @@ class MongoOperation:
 class MongoBackup:
     def __init__(
         self,
-        uri: str = ADMIN_MONGO_URI,
-        db_name: str = MONGO_DB,
-        collection_name: str = MONGO_COLLECTION,
-        backup_dir: str | Path = BACKUP_DIR,
+        uri: str | None = None,
+        db_name: str | None = None,
+        collection_name: str | None = None,
+        backup_dir: str | Path | None = None,
     ):
-        self.db_name = db_name
-        self.collection_name = collection_name
-        self.client = MongoClient(uri)
-        self.db = self.client[db_name]
-        self.collection: Collection = self.db[collection_name]
-        self.backup_dir = Path(backup_dir)
+        mongo_cfg = get_config().rag.mongo
+        self.db_name = db_name or mongo_cfg.db_name
+        self.collection_name = collection_name or mongo_cfg.collection
+        self.client = MongoClient(uri or mongo_cfg.admin_uri)
+        self.db = self.client[self.db_name]
+        self.collection: Collection = self.db[self.collection_name]
+        # 备份目录收敛到 project.backup.backup_dir
+        self.backup_dir = Path(backup_dir) if backup_dir is not None else Path(get_config().project.backup.backup_dir)
         self.backup_dir.mkdir(parents=True, exist_ok=True)
 
     def backup_collection(self, query: dict | None = None, label: str = ""):
@@ -199,8 +206,9 @@ class MongoBackup:
 
 
 class SqliteOperation:
-    def __init__(self, db_path: str | Path = META_DB_PATH):
-        self.db_path = str(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        # 未显式传入则读统一配置 rag.sqlite.meta_db_path
+        self.db_path = str(db_path) if db_path is not None else str(get_config().rag.sqlite.meta_db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -269,10 +277,12 @@ class SqliteOperation:
 
 
 class VectorOperation:
-    def __init__(self, path: str | Path = CHROMA_PATH, collection_name: str = CHROMA_COLLECTION):
-        self.client = chromadb.PersistentClient(path=str(path))
+    def __init__(self, path: str | Path | None = None, collection_name: str | None = None):
+        # 未显式传入则读统一配置 rag.chroma.*
+        chroma_cfg = get_config().rag.chroma
+        self.client = chromadb.PersistentClient(path=str(path) if path is not None else str(chroma_cfg.path))
         self.collection = self.client.get_or_create_collection(
-            name=collection_name,
+            name=collection_name or chroma_cfg.collection,
             metadata={"hnsw:space": "cosine"},
         )
 

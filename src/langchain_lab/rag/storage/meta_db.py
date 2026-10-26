@@ -1,5 +1,4 @@
-"""
-SQLite 存储层：管理 chunk 元数据与文本，以及文档与 chunk 的映射。
+"""SQLite 存储层：管理 chunk 元数据与文本，以及文档与 chunk 的映射。
 同时提供简易关键字检索（Bigram + LIKE），用于混合检索。
 职责：仅做数据存取，内置底层租户隔离兜底约束；业务权限、角色逻辑上移至service。
 """
@@ -8,7 +7,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from langchain_lab.core.config._config import META_DB_PATH
+from langchain_lab.core.config.config_core import get_config
 
 
 class MetaDB:
@@ -29,8 +28,9 @@ class MetaDB:
     )
     """
 
-    def __init__(self, db_path: str | Path = META_DB_PATH):
-        self.db_path = str(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        # 未显式传入则读统一配置 rag.sqlite.meta_db_path（原硬编码 META_DB_PATH 已收敛）
+        self.db_path = str(db_path) if db_path is not None else str(get_config().rag.sqlite.meta_db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _get_conn(self) -> sqlite3.Connection:

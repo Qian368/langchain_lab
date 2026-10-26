@@ -6,9 +6,14 @@
 
 from pathlib import Path
 
-from pydantic import Field
+from dotenv import load_dotenv
+from pydantic import Field, model_validator
 
+from langchain_lab.core.config.env_expand import expand_model_fields
 from langchain_lab.core.config.evented_model import EventedModel
+
+# 确保 ${VAR} 展开能读到 .env（与 llm_schema 一致，避免隐式依赖它的副作用）
+load_dotenv()
 
 
 # ===================== RAG 领域子模型 =====================
@@ -25,6 +30,12 @@ class RagMongoSettings(EventedModel):
     admin_uri: str = ""
     db_name: str = "knowledge_base"
     collection: str = "kb_documents"
+
+    @model_validator(mode="after")
+    def expand_env(self):
+        """加载后展开 ${VAR}：yaml 占位 → .env 实际值（连接串不落明文）"""
+        expand_model_fields(self, ("user_uri", "admin_uri"))
+        return self
 
 
 class RagSqliteSettings(EventedModel):
@@ -47,6 +58,12 @@ class RagFileSettings(EventedModel):
     upload_dir: Path = Field(default_factory=lambda: Path("./data/uploads"))
 
 
+class RagEmbeddingSettings(EventedModel):
+    """RAG 嵌入模型配置"""
+
+    model: str = Field(default="../models/bge-small-zh-v1.5", description="嵌入模型路径或名称")
+
+
 class RagSettings(EventedModel):
     """RAG 领域根配置
     包含 RAG 全链路所有组件配置
@@ -57,3 +74,4 @@ class RagSettings(EventedModel):
     sqlite: RagSqliteSettings = Field(default_factory=RagSqliteSettings)
     chroma: RagChromaSettings = Field(default_factory=RagChromaSettings)
     file: RagFileSettings = Field(default_factory=RagFileSettings)
+    embedding: RagEmbeddingSettings = Field(default_factory=RagEmbeddingSettings)
