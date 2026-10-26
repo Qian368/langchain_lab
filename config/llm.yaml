@@ -1,31 +1,36 @@
 # ============ 不测试连通性，配置满足要求即可用 =============
-# 实例名自定义
-default_instance: zhipuai
+# 实例名自定义（顶层 llm: 包裹，与 ConfigLoader.llm 字段对齐，同 rag/mcp/project 结构）
+#
+# 【占位符语法】本文件任意字符串字段可写 ${VAR} 占位，真实值在 .env 中定义（密钥不落明文）：
+#     api_key: ${DEEPSEEK_API_KEY}
+# 加载时自动替换为 .env 里的值；未设置的变量替换为空串（对应实例将因缺 key 不可用）。
+llm:
+  default_instance: zhipuai
 
-instances:
-  deepseek:
-    provider: deepseek
-    model: deepseek-flash
-    api_key: ${DEEPSEEK_API_KEY}
-    base_url: https://api.deepseek.com/v1
-    temperature: 0.7
-    max_tokens: 3000
+  instances:
+    deepseek:
+      provider: deepseek
+      model: deepseek-flash
+      api_key: ${DEEPSEEK_API_KEY}
+      base_url: https://api.deepseek.com/v1
+      temperature: 0.7
+      max_tokens: 3000
 
-  zhipuai:
-    provider: openai
-    model: glm-5.2
-    api_key: ${ZHIPUAI_API_KEY}
-    base_url: https://open.bigmodel.cn/api/paas/v4/
-    temperature: 0.7
-    max_tokens: 3000
+    zhipuai:
+      provider: openai
+      model: glm-5.2
+      api_key: ${ZHIPUAI_API_KEY}
+      base_url: https://open.bigmodel.cn/api/paas/v4/
+      temperature: 0.7
+      max_tokens: 3000
 
-  qwen:
-    provider: openai            # 用 OpenAI 兼容协议接通义
-    model: qwen-plus
-    api_key: ${DASHSCOPE_API_KEY}
-    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    qwen:
+      provider: openai            # 用 OpenAI 兼容协议接通义
+      model: qwen-plus
+      api_key: ${DASHSCOPE_API_KEY}
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
 
-  local:
-    provider: ollama            # 本地模型不需要 api_key
-    model: qwen3:8b
-    base_url: http://localhost:11434/v1    
+    local:
+      provider: ollama            # 本地模型不需要 api_key
+      model: qwen3:8b
+      base_url: http://localhost:11434/v1

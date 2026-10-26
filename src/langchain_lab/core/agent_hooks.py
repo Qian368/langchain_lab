@@ -13,8 +13,8 @@
 
 钩子可以是同步 Callable 或 async Callable，运行时通过 ChatSession._run_hook 统一 await。
 """
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 
 @dataclass(slots=True)
@@ -26,6 +26,6 @@ class AgentHooks:
     - post_tool(result: dict) -> dict | None        工具执行结果校验/脱敏/替换（构造 ToolMessage 前）
     """
 
-    pre_user_message: Optional[Callable] = None
-    post_llm: Optional[Callable] = None
-    post_tool: Optional[Callable] = None
+    pre_user_message: Callable | None = None
+    post_llm: Callable | None = None
+    post_tool: Callable | None = None

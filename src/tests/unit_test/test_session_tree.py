@@ -39,7 +39,10 @@ def test_branch_history_inherits_ancestors():
         store.subscribe_to_bus(bus)
         await _seed_root(store, bus, n=3)  # root: h0,a0,h1,a1,h2,a2
         b1, _pv = await store.create_branch("s1", "root", 4)  # 拐点=root 第4条(h1)
-        bus.publish(Event(EventType.MESSAGES_ARCHIVED, "s1", {"branch_id": b1, "messages": _arch([HumanMessage(content="hB0"), AIMessage(content="aB0")])}))
+        bus.publish(Event(
+            EventType.MESSAGES_ARCHIVED, "s1",
+            {"branch_id": b1, "messages": _arch([HumanMessage(content="hB0"), AIMessage(content="aB0")])},
+        ))
         await bus.flush()
         hist = await store.branch_history("s1", b1)
         assert [m.content for m in hist] == ["h0", "a0", "h1", "a1", "hB0", "aB0"]
@@ -74,14 +77,16 @@ def test_summary_archived_and_recent_in_load_view():
         store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
         store.subscribe_to_bus(bus)
         await _seed_root(store, bus, n=3)
+        # 串行落库（两次各 flush）：保证 load_view 取"最近"摘要确定性——并行 to_thread 落库顺序不定会取到旧摘要
         bus.publish(Event(EventType.SUMMARY_ARCHIVED, "s1", {"summary": "摘要一", "branch_id": "root"}))
+        await bus.flush()
         bus.publish(Event(EventType.SUMMARY_ARCHIVED, "s1", {"summary": "摘要二", "branch_id": "root"}))
         await bus.flush()
         view = await store.load_view("s1", "root", keep_recent_turns=2)
         assert view[0].content == "sys"
         assert isinstance(view[1], HumanMessage) and view[1].additional_kwargs.get("meta") == "summary"
         assert view[1].content == "[对话历史摘要]\n摘要二"
-        assert [m.content for m in view[2:]] == ["h2", "a2"]
+        assert [m.content for m in view[2:]] == ["h1", "a1", "h2", "a2"]  # 最近 keep=2 轮
     asyncio.run(scenario())
 
 
@@ -167,6 +172,8 @@ def test_rename_session_and_branch():
     async def scenario():
         store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
         await store.ensure_session("s1", {"user_id": "u1", "tenant_id": "t1"}, "sys", name="旧名")
+        # 先归档 2 条到 root，create_branch 拐点 2 才有历史可分叉
+        store._append_archive_sync("s1", "root", "seed", _arch([HumanMessage(content="h0"), AIMessage(content="a0")]))
         b1, _ = await store.create_branch("s1", "root", 2, name="分支A")
         await store.rename_session("s1", "会话新名")
         await store.rename_branch("s1", b1, "分支B")
@@ -212,7 +219,7 @@ def test_session_command_branch_delete_root_emits_deleted():
         bus.subscribe(EventType.SESSION_DELETED, lambda e: emitted.append(e.payload))
         async def deleter(bid):
             return [bid]
-        chat = ChatSession(
+        ChatSession(
             session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus,
             llm=None, tools=[], branch_id="root", history=[SystemMessage(content="sys")],
             branch_deleter=deleter,

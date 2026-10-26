@@ -5,7 +5,6 @@
 """
 
 from pathlib import Path
-from typing import TypedDict
 
 from pydantic import Field
 

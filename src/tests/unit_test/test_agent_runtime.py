@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from langchain_lab.core.agent_runtime import AgentRuntime
-from langchain_lab.core.event_bus import EventBus
 from langchain_lab.core.events import EventType
 
 _MOCK_CFG = SimpleNamespace(

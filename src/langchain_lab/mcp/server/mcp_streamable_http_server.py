@@ -44,7 +44,7 @@ app = mcp_server.streamable_http_app(
 app.add_middleware(ExecContextMiddleware)
 
 
-async def main():
+async def run_http_server():
     # 服务启动：全局模板初始化 + 配置订阅
     setup_exec_context()
 
@@ -60,5 +60,9 @@ async def main():
     await server.serve()
 
 
+def main():
+    anyio.run(run_http_server)
+
+
 if __name__ == "__main__":
-    anyio.run(main)
+    main()

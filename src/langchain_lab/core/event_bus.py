@@ -18,6 +18,7 @@ handler 必须可重入幂等（at-least-once 会重复投递，event_id 去重�
 - 新式定向/通配：subscribe(handler, event_type, session_id=session_id or None)
 """
 import asyncio
+import contextlib
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Protocol
@@ -53,7 +54,13 @@ class EventBus:
         self._handlers: dict[tuple[EventType, str | None], list[Handler]] = {}
         self._pending: list[asyncio.Task] = []  # 跟踪后台 async handler，flush 用
 
-    def subscribe(self, first, second=None, *, session_id: str | None = None) -> None:
+    def subscribe(
+        self,
+        first: EventType | Handler,
+        second: Handler | EventType | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         """订阅。兼容两种写法：
         - 旧式通配：subscribe(event_type, handler)
         - 新式定向/通配：subscribe(handler, event_type, session_id=session_id or None)
@@ -62,15 +69,25 @@ class EventBus:
             event_type, handler = first, second
         else:
             handler, event_type = first, second
+        if not isinstance(event_type, EventType) or not callable(handler):
+            raise TypeError("subscribe: 期望 (event_type, handler) 或 (handler, event_type)")
         key = (event_type, session_id)
         self._handlers.setdefault(key, []).append(handler)
 
-    def unsubscribe(self, first, second=None, *, session_id: str | None = None) -> None:
+    def unsubscribe(
+        self,
+        first: EventType | Handler,
+        second: Handler | EventType | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         """取消订阅，签名同 subscribe。调用方需保证已订阅过，否则抛 ValueError"""
         if isinstance(first, EventType):
             event_type, handler = first, second
         else:
             handler, event_type = first, second
+        if not isinstance(event_type, EventType) or not callable(handler):
+            raise TypeError("unsubscribe: 期望 (event_type, handler) 或 (handler, event_type)")
         key = (event_type, session_id)
         self._handlers.get(key, []).remove(handler)
 
@@ -86,9 +103,15 @@ class EventBus:
                 task.add_done_callback(self._discard_pending)
 
     async def flush(self) -> None:
-        """等待所有后台 async handler 完成。TurnComplete / close 时调用，保证落库后再继续"""
-        if self._pending:
-            await asyncio.gather(*self._pending, return_exceptions=True)
+        """等待所有后台 async handler 完成。TurnComplete / close 时调用，保证落库后再继续。
+
+        排除当前正在执行的 task：handler 内部（如 _handle_turn 收尾）再调 flush 时，
+        若 gather 含自身 task 会自包含死锁（task await 自己）；排除后只等其子任务。
+        """
+        current = asyncio.current_task()
+        pending = [t for t in self._pending if t is not current]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def close(self) -> None:
         """释放通道：等后台任务完成 + 清空订阅（停机语义）"""
@@ -97,7 +120,5 @@ class EventBus:
 
     def _discard_pending(self, task: asyncio.Task) -> None:
         """任务完成后的清理：从 _pending 移除，避免泄漏；并发移除时容忍 ValueError"""
-        try:
+        with contextlib.suppress(ValueError):
             self._pending.remove(task)
-        except ValueError:
-            pass

@@ -1,8 +1,8 @@
 """事件总线单测：同步派发 / async handler+flush / 类型隔离 / 多会话过滤"""
 import asyncio
 
-from langchain_lab.core.events import Event, EventType
 from langchain_lab.core.event_bus import EventBus
+from langchain_lab.core.events import Event, EventType
 
 
 def test_sync_handler_receives_event():

@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import Field, model_validator
 
-from langchain_lab.core.config.env_expand import expand_model_fields
+from langchain_lab.core.config.env_expand import expand_model_env
 from langchain_lab.core.config.evented_model import EventedModel
 
 # 确保 ${VAR} 展开能读到 .env（与 llm_schema 一致，避免隐式依赖它的副作用）
@@ -34,7 +34,7 @@ class RagMongoSettings(EventedModel):
     @model_validator(mode="after")
     def expand_env(self):
         """加载后展开 ${VAR}：yaml 占位 → .env 实际值（连接串不落明文）"""
-        expand_model_fields(self, ("user_uri", "admin_uri"))
+        expand_model_env(self)
         return self
 
 

@@ -9,9 +9,11 @@
 - MCP 连接 clear_all 在 AgentRuntime.close()（服务停机语义，不在 ChatSession 内）
 - 系统提示词不再前端自定义，由后端全局配置加载（runtime 注入）
 """
+
 import asyncio
 
 from langchain_lab.core.agent_runtime import AgentRuntime
+from langchain_lab.core.commands import INSTRUCTION_SPECS, get_spec
 from langchain_lab.core.event_bus import EventChannel
 from langchain_lab.core.events import Event, EventType
 from langchain_lab.util.prompt_style import Printer
@@ -19,43 +21,72 @@ from langchain_lab.util.prompt_style import Printer
 _DEFAULT_SESSION_NAME = "新会话"
 
 
+def _build_alias_map() -> dict[str, str]:
+    """从指令注册表构建 终端别名(alias) → action(name) 反查表（单一真相源）"""
+    return {
+        alias: name
+        for name, spec in INSTRUCTION_SPECS.items()
+        for alias in spec.get("aliases", [])
+    }
+
+
+_ALIAS_TO_ACTION = _build_alias_map()
+
+
 def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
     """终端接入层解析输入（指令面/消息面分类；指令解析在接入层，运行时只响应事件）
 
-    返回 (event_type, payload)：
-    - 识别到指令 → (对应事件类型, payload)
-    - 像指令但非法（以 : 或 / 开头、参数不合法）→ (None, {"error": 提示})
+    命令表由指令注册表派生（aliases → action，payload 按注册表 schema 填充必填字段），
+    不再散落硬编码别名/参数。返回 (event_type, payload)：
+    - 识别到注册表指令 → (SESSION_COMMAND, {"action":..., 载荷字段})
+    - 独立触发面（:compress，非注册表 SESSION_COMMAND 指令）→ (COMPRESS_REQUESTED, payload)
+    - 像指令但非法（别名存在但参数缺失/类型错/不满足约束）→ (None, {"error": 提示})
     - 普通消息 → (None, None)
     """
     parts = text.strip().split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
 
-    if cmd in (":branch", "/branch"):
-        if arg.isdigit() and int(arg) >= 1:
-            return EventType.SESSION_COMMAND, {"action": "branch_create", "point": int(arg)}
-        return None, {"error": "branch 用法：:branch <N>（N≥1 的对话消息序号）"}
-    if cmd in (":branches", "/branches"):
-        return EventType.SESSION_COMMAND, {"action": "branch_list"}
-    if cmd in (":switch", "/switch"):
-        if arg:
-            return EventType.SESSION_COMMAND, {"action": "branch_switch", "branch_id": arg}
-        return None, {"error": "switch 用法：:switch <branch_id>"}
-    if cmd in (":delete", "/delete"):
-        if arg:
-            return EventType.SESSION_COMMAND, {"action": "branch_delete", "branch_id": arg}
-        return None, {"error": "delete 用法：:delete <branch_id>（root=删除整个会话）"}
-    if cmd in (":rename", "/rename"):
-        if arg:
-            return EventType.SESSION_COMMAND, {"action": "rename", "name": arg}
-        return None, {"error": "rename 用法：:rename <新名字>（当前分支 root 改会话名，否则改分支名）"}
-    if cmd in (":compress", "/compress"):
-        keep = int(arg) if arg.isdigit() and int(arg) >= 1 else None
-        return EventType.COMPRESS_REQUESTED, {"force": True, "keep": keep}
-    if cmd in (":rerun", "/rerun", ":regenerate"):
-        # 重跑当前最后一条人类消息轮（复用工具结果；接入层解析即触发）
-        return EventType.SESSION_COMMAND, {"action": "regenerate"}
-    return None, None  # 普通消息
+    action = _ALIAS_TO_ACTION.get(cmd)
+    if action is None:
+        # 独立触发面（非 SESSION_COMMAND 指令）：压缩触发，保留特殊处理
+        if cmd in (":compress", "/compress"):
+            keep = int(arg) if arg.isdigit() and int(arg) >= 1 else None
+            return EventType.COMPRESS_REQUESTED, {"force": True, "keep": keep}
+        return None, None  # 普通消息
+
+    spec = get_spec(action)
+    assert spec is not None, f"未注册指令 action={action}"
+    payload_fields = spec.get("payload") or {}
+    payload: dict = {}
+    # 按注册表 schema 填充必填字段（终端单参数：取第一个 required 字段，类型转换 + 约束校验）
+    required = [f for f, m in payload_fields.items() if m.get("required")]
+    if required:
+        fname = required[0]
+        fmeta = payload_fields[fname]
+        if not arg:
+            return None, {"error": f"{cmd} 用法：{cmd} <{fname}>（{fmeta.get('description') or ''}）"}
+        try:
+            value: int | str = int(arg) if fmeta.get("type") == "integer" else arg
+        except ValueError:
+            return None, {"error": f"{cmd} 参数 {fname} 需为 {fmeta.get('type')}"}
+        if fmeta.get("minimum") is not None and isinstance(value, int) and value < fmeta["minimum"]:
+            return None, {"error": f"{cmd} 参数 {fname} 需 >= {fmeta['minimum']}"}
+        payload[fname] = value
+
+    return EventType.SESSION_COMMAND, {"action": action, **payload}
+
+
+def _build_help_text() -> str:
+    """终端帮助：从指令注册表生成（别名 + 必填参数 + 描述），单一真相源"""
+    lines = ["控制面指令（来源：指令注册表）："]
+    for name, spec in INSTRUCTION_SPECS.items():
+        aliases = " / ".join(spec.get("aliases", []))
+        required = [f for f, m in (spec.get("payload") or {}).items() if m.get("required")]
+        usage = aliases + (f" <{' '.join(required)}>" if required else "")
+        lines.append(f"  {usage}  — {spec.get('description')}")
+    lines.append("  手动压缩：:compress [保留轮数]（独立触发面，非注册表指令）")
+    return "\n".join(lines)
 
 
 class _TerminalRenderer:
@@ -215,10 +246,7 @@ async def main() -> None:
     bus.subscribe(_on_turn_done, EventType.AGENT_TURN_DONE, session_id=session_id)
     bus.subscribe(_on_compressed, EventType.CONTEXT_COMPRESSED, session_id=session_id)
     bus.subscribe(_on_deleted, EventType.SESSION_DELETED, session_id=session_id)
-    renderer.info(
-        "提示：分支  :branch <N> / :branches / :switch <id>；删除  :delete <id>（root=整会话）；"
-        "重命名  :rename <名>；重跑当前轮  :rerun；手动压缩  :compress [保留轮数]"
-    )
+    renderer.info(_build_help_text())
 
     try:
         await chat.start(resumed=resumed)
@@ -226,14 +254,17 @@ async def main() -> None:
             human_prompt = await renderer.prompt_async("请向你的助手发送消息(shift + enter 换行)：\n> ")
             if human_prompt == "0":
                 break
+            if human_prompt.strip().lower() in (":help", "/help", "help"):
+                renderer.info(_build_help_text())
+                continue
             etype, payload = _parse_command(human_prompt)
-            if etype is not None:
+            if etype is not None and payload is not None:
                 if etype == EventType.COMPRESS_REQUESTED:
                     compress_done.clear()
                     runtime.request_compress(session_id, force=True, keep=payload.get("keep"))
                     try:
                         await asyncio.wait_for(compress_done.wait(), timeout=10)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         renderer.info("无可压早期轮或压缩未完成")
                 else:  # SESSION_COMMAND（含 :rerun，走 _do_regenerate，自带 AGENT_TURN_DONE）
                     done.clear()
@@ -242,6 +273,8 @@ async def main() -> None:
                     if session_deleted.is_set():  # 删了 root（整个会话）→ 退出
                         break
                 continue
+            if etype is not None and payload is None:
+                renderer.info("输入指令缺乏参数，请输入正确指令")
             if payload is not None:  # 像指令但非法 → 接入层提示
                 renderer.info(payload.get("error", "无法识别的指令"))
                 continue

@@ -8,8 +8,8 @@ from jwt.warnings import InsecureKeyLengthWarning
 from langchain.chat_models import init_chat_model
 
 from langchain_lab import __project_name__
+from langchain_lab.core.config.app_schema.llm_models import LLMInstanceConfig
 from langchain_lab.core.config.config_core import get_config
-from langchain_lab.core.llm.llm_schema import LLMInstanceConfig
 
 warnings.filterwarnings("ignore", category=InsecureKeyLengthWarning)
 init(autoreset=True)
@@ -89,10 +89,7 @@ def get_llm(name: str | None = None):
         return build_llm(available[name])
 
     # 4. 多个可用且没有默认 → questionary 选择
-    choices = [
-        questionary.Choice(title=f"{name} ({cfg.provider}：{cfg.model})", value=name)
-        for name, cfg in available.items()
-    ]
+    choices = [questionary.Choice(title=f"{name} ({cfg.provider}：{cfg.model})", value=name) for name, cfg in available.items()]
     selected = questionary.select("检测到多个可用的模型，请选择：", choices=choices).ask()
     return build_llm(available[selected])
 

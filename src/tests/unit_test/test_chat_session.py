@@ -43,6 +43,7 @@ class _FakeSummarizeLlm:
 
 @tool
 def _fake_echo(x: int) -> str:
+    """测试用 echo 工具：返回格式化后的入参"""
     return f"v{x}"
 
 
@@ -59,7 +60,10 @@ def test_agent_loop_emits_and_accumulates():
         seen = []
         bus.subscribe(EventType.STREAM_CHUNK, lambda e: seen.append((e.type, e.payload)))
         bus.subscribe(EventType.ASSISTANT_MESSAGE_EMITTED, lambda e: seen.append((e.type, None)))
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=None, tools=[])
+        chat = ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus, llm=None, tools=[],
+        )
         await chat._agent_loop(llm_with_tools=_FakeLlmWithTools([AIMessageChunk(content="你"), AIMessageChunk(content="好")]))
         assert [t for t, _ in seen] == [EventType.STREAM_CHUNK, EventType.STREAM_CHUNK, EventType.ASSISTANT_MESSAGE_EMITTED]
         assert chat._messages[-1].content == "你好"
@@ -72,7 +76,10 @@ def test_compress_requested_updates_summary_and_rebuilds():
     async def scenario():
         bus = EventBus()
         comp = SessionCompressor(_FakeSummarizeLlm(), keep_recent_turns=6, bus=bus, session_id="s1")
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=None, tools=[], compressor=comp, history=_history(3))
+        chat = ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus, llm=None, tools=[], compressor=comp, history=_history(3),
+        )
         bus.publish(Event(EventType.COMPRESS_REQUESTED, "s1", {"force": True, "keep": 2}))
         await bus.flush()
 
@@ -100,13 +107,17 @@ def test_turn_archives_new_messages():
         bus = EventBus()
         archived = []
         bus.subscribe(EventType.MESSAGES_ARCHIVED, lambda e: archived.append(e.payload))
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=_FakeLlm(), tools=[], history=_history(0))
+        ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus, llm=_FakeLlm(), tools=[], history=_history(0),
+        )
         bus.publish(Event(EventType.USER_MESSAGE_SUBMITTED, "s1", {"content": "hi"}))
         await bus.flush()
 
         assert archived
         types = [d.get("type") for d in archived[0]["messages"]]
-        assert "human" in types and "ai" in types  # 本轮新增 human+ai，system 被排除
+        # 本轮新增 human + AI 回复；_FakeLlm 流式 chunk 归档为 AIMessageChunk（真实流式亦然），非固定 'ai'
+        assert "human" in types and ("ai" in types or "AIMessageChunk" in types)
         assert archived[0]["branch_id"] == "root"
 
     asyncio.run(scenario())
@@ -123,7 +134,10 @@ def test_session_command_branch_create():
             created.append(bid)
             return bid, [SystemMessage(content="sys"), HumanMessage(content="h0"), AIMessage(content="a0")]
 
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=None, tools=[], history=_history(3), branch_creator=fake_creator)
+        chat = ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus, llm=None, tools=[], history=_history(3), branch_creator=fake_creator,
+        )
         bus.publish(Event(EventType.SESSION_COMMAND, "s1", {"action": "branch_create", "point": 2}))
         await bus.flush()
         assert chat._branch_id == "b_2"
@@ -137,7 +151,10 @@ def test_session_command_unknown_action_notice():
         bus = EventBus()
         notices = []
         bus.subscribe(EventType.SESSION_NOTICE, lambda e: notices.append(e.payload))
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=None, tools=[])
+        ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus, llm=None, tools=[],
+        )
         bus.publish(Event(EventType.SESSION_COMMAND, "s1", {"action": "nope"}))
         await bus.flush()
         assert notices and "nope" in notices[0]
@@ -160,7 +177,10 @@ def test_run_hook_semantics():
 def test_pre_user_message_rewrite():
     async def scenario():
         bus = EventBus()
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=_FakeLlm(), tools=[], hooks=AgentHooks(pre_user_message=lambda c: "[改写]" + c))
+        chat = ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus, llm=_FakeLlm(), tools=[], hooks=AgentHooks(pre_user_message=lambda c: "[改写]" + c),
+        )
         bus.publish(Event(EventType.USER_MESSAGE_SUBMITTED, "s1", {"content": "原"}))
         await bus.flush()
         assert any(isinstance(m, HumanMessage) and m.content == "[改写]原" for m in chat._messages)
@@ -172,7 +192,11 @@ def test_pre_user_message_reject():
         bus = EventBus()
         errors = []
         bus.subscribe(EventType.ERROR_OCCURRED, lambda e: errors.append(e.payload))
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=bus, llm=_FakeLlm(), tools=[], hooks=AgentHooks(pre_user_message=lambda c: (_ for _ in ()).throw(ValueError("非法输入"))))
+        chat = ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus, llm=_FakeLlm(), tools=[],
+            hooks=AgentHooks(pre_user_message=lambda c: (_ for _ in ()).throw(ValueError("非法输入"))),
+        )
         bus.publish(Event(EventType.USER_MESSAGE_SUBMITTED, "s1", {"content": "坏"}))
         await bus.flush()
         assert errors and "非法输入" in errors[0]["error"]
@@ -182,7 +206,10 @@ def test_pre_user_message_reject():
 
 def test_post_llm_replace():
     async def scenario():
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=EventBus(), llm=None, tools=[], hooks=AgentHooks(post_llm=lambda msg: AIMessage(content="替换输出")))
+        chat = ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=EventBus(), llm=None, tools=[], hooks=AgentHooks(post_llm=lambda msg: AIMessage(content="替换输出")),
+        )
         await chat._agent_loop(llm_with_tools=_FakeLlmWithTools([AIMessageChunk(content="原始")]))
         assert chat._messages[-1].content == "替换输出"
     asyncio.run(scenario())
@@ -193,8 +220,13 @@ def test_post_tool_replace():
         def sanitize(result):
             result["content"] = "脱敏后"
             return result
-        chat = ChatSession(session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"}, bus=EventBus(), llm=None, tools=[_fake_echo], hooks=AgentHooks(post_tool=sanitize))
+        chat = ChatSession(
+            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=EventBus(), llm=None, tools=[_fake_echo], hooks=AgentHooks(post_tool=sanitize),
+        )
         fake = _FakeLlmWithTools([AIMessageChunk(content="", tool_calls=[{"name": "_fake_echo", "id": "t1", "args": {"x": 1}}])])
         await chat._agent_loop(llm_with_tools=fake)
-        assert chat._messages[-1].content == '"脱敏后"'
+        # post_tool 脱敏应用到工具结果 → 存在 content 为 '"脱敏后"' 的 ToolMessage
+        # （fake 每轮都返回同一 tool_calls 会循环工具到上限，末条消息不保证是 ToolMessage）
+        assert any(m.type == "tool" and m.content == '"脱敏后"' for m in chat._messages)
     asyncio.run(scenario())

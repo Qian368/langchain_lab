@@ -289,9 +289,9 @@ def test_subclass_signals_independent():
     SampleEventedModel()._get_signal("name")
     AnotherEventedModel()._get_signal("title")
 
-    # 每个子类只包含自身定义的字段信号
-    assert set(SampleEventedModel._signals.keys()).issubset({"name", "count", "enabled", "sub"})
-    assert set(AnotherEventedModel._signals.keys()).issubset({"title", "level"})
+    # 每个子类只包含自身定义的字段信号（__instance__ 是框架的实例级信号 key，非字段，排除）
+    assert set(SampleEventedModel._signals.keys()) - {"__instance__"} <= {"name", "count", "enabled", "sub"}
+    assert set(AnotherEventedModel._signals.keys()) - {"__instance__"} <= {"title", "level"}
     # 信号字典不是同一个对象
     assert SampleEventedModel._signals is not AnotherEventedModel._signals
 

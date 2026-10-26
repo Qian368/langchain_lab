@@ -108,10 +108,14 @@ class SessionCompressor:
 
     # ---------- 视图重建（压缩后 ChatSession 调用，改写 _messages） ----------
     def build_llm_context(
-        self, messages: list[BaseMessage], summary: str | None
+        self, messages: list[BaseMessage], summary: str | None,
+        keep_recent_turns: int | None = None,
     ) -> list[BaseMessage]:
-        """重建视图 = System + Human摘要 + 最近 keep 轮（早期轮移出，已由归档表保存）"""
-        return build_llm_context(messages, summary, self._keep_recent_turns)
+        """重建视图 = System + Human摘要 + 最近 keep 轮（早期轮移出，已由归档表保存）
+
+        keep_recent_turns 可覆盖（手动提前压缩传 keep）；None 用构造时默认。
+        """
+        return build_llm_context(messages, summary, keep_recent_turns or self._keep_recent_turns)
 
     def build_display_context(
         self, messages: list[BaseMessage], summary: str | None

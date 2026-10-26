@@ -12,10 +12,12 @@
   archive 仍保留审计痕迹（deleted=1），前端/恢复只看到新回答。
 - 【幂等】事件带 event_id，archive UNIQUE(session_id,branch_id,event_id,seq) + INSERT OR IGNORE。
 - 【通道】依赖 EventChannel（Port），通配订阅收所有会话（持久化跨会话）；运行时只组装，不内联。
-- 订阅：MESSAGES_ARCHIVED（增量归档）/ SESSION_CLOSED（标关闭）/ CONTEXT_COMPRESSED（更新会话级 summary 文本）/\n  SUMMARY_ARCHIVED（摘要消息按分支落 archive，由 ChatSession 携带当前 branch_id 发出）/ MESSAGE_SUPERSEDED（作废旧回答）。
+- 订阅：MESSAGES_ARCHIVED（增量归档）/ SESSION_CLOSED（标关闭）/ CONTEXT_COMPRESSED（更新会话级 summary 文本）/
+  SUMMARY_ARCHIVED（摘要消息按分支落 archive，由 ChatSession 携带当前 branch_id 发出）/ MESSAGE_SUPERSEDED（作废旧回答）。
 - 命名：sessions.name / branches.name（展示用，默认值、非唯一）。
 """
 import asyncio
+import contextlib
 import json
 import sqlite3
 import time
@@ -39,10 +41,21 @@ class ContextStore:
         self._db_path = str(db_path)
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+    @contextlib.contextmanager
+    def _connect(self):
+        """打开 SQLite 连接：事务提交 + 显式关闭。
+        `with sqlite3.connect(...) as conn:` 只 commit 不 close，靠 GC 关闭在
+        to_thread/Windows 下不可靠（文件被锁、tempdir 删不掉）。"""
+        conn = sqlite3.connect(self._db_path)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         """开发期 schema 演进：旧库需重建。"""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sessions(
@@ -107,7 +120,7 @@ class ContextStore:
 
     def _on_session_closed(self, event: Event) -> None:
         """标记会话关闭（轻量，同步即可）"""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute("UPDATE sessions SET status='closed' WHERE session_id=?", (event.session_id,))
 
     async def _on_compressed(self, event: Event) -> None:
@@ -161,17 +174,16 @@ class ContextStore:
         tenant_id = (session_ctx or {}).get("tenant_id", "")
         system_prompt = system_prompt or ""
         name = name or _DEFAULT_SESSION_NAME
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
-                """INSERT INTO sessions(session_id, user_id, tenant_id, title, name, system_prompt, summary, status, created_at, updated_at)
-                   VALUES(?,?,?,?,'','','active',?,?)
+                f"""INSERT INTO sessions(session_id, user_id, tenant_id, title, name, system_prompt, summary, status, created_at, updated_at)
+                   VALUES(?,?,?,'',?,?,'','active',?,?)
                    ON CONFLICT(session_id) DO UPDATE SET
                      user_id=excluded.user_id, tenant_id=excluded.tenant_id,
-                     name=CASE WHEN excluded.name<>'' AND excluded.name<>'%s' THEN excluded.name ELSE sessions.name END,
+                     name=CASE WHEN excluded.name<>'' AND excluded.name<>'{_DEFAULT_SESSION_NAME}' THEN excluded.name ELSE sessions.name END,
                      system_prompt=CASE WHEN excluded.system_prompt<>'' THEN excluded.system_prompt ELSE sessions.system_prompt END,
                      status=CASE WHEN sessions.status='deleted' THEN 'active' ELSE sessions.status END,
-                     updated_at=excluded.updated_at"""
-                % _DEFAULT_SESSION_NAME,
+                     updated_at=excluded.updated_at""",
                 (session_id, user_id, tenant_id, name, system_prompt, now, now),
             )
             conn.execute(
@@ -183,9 +195,12 @@ class ContextStore:
     def _append_archive_sync(self, session_id, branch_id, event_id, dicts) -> None:
         """追加归档真实消息：append-only，INSERT OR IGNORE 幂等"""
         now = time.time()
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.executemany(
-                "INSERT OR IGNORE INTO message_archive(session_id, branch_id, event_id, seq, role, kind, payload, deleted, created_at) VALUES(?,?,?,?,?,'message',?,0,?)",
+                (
+                    "INSERT OR IGNORE INTO message_archive(session_id, branch_id, event_id, seq, role, kind, "
+                    "payload, deleted, created_at) VALUES(?,?,?,?,?,'message',?,0,?)"
+                ),
                 [
                     (session_id, branch_id, event_id, i, d.get("type", ""), json.dumps(d, ensure_ascii=False), now)
                     for i, d in enumerate(dicts)
@@ -195,17 +210,20 @@ class ContextStore:
     def _append_summary_sync(self, session_id, branch_id, event_id, summary) -> None:
         """摘要消息（kind=summary）append 进指定分支 archive；同一 event_id 幂等"""
         msg_dict = messages_to_dict(
-            HumanMessage(content=f"[对话历史摘要]\n{summary}", additional_kwargs={"meta": "summary"})
-        )
-        with sqlite3.connect(self._db_path) as conn:
+            [HumanMessage(content=f"[对话历史摘要]\n{summary}", additional_kwargs={"meta": "summary"})]
+        )[0]
+        with self._connect() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO message_archive(session_id, branch_id, event_id, seq, role, kind, payload, deleted, created_at) VALUES(?,?,'summary',0,'human','summary',?,0,?)",
+                (
+                    "INSERT OR IGNORE INTO message_archive(session_id, branch_id, event_id, seq, role, kind, "
+                    "payload, deleted, created_at) VALUES(?,?,?,0,'human','summary',?,0,?)"
+                ),
                 (session_id, branch_id, event_id, json.dumps(msg_dict, ensure_ascii=False), time.time()),
             )
 
     def _update_summary_sync(self, session_id, summary) -> None:
         """更新会话级 summary 文本（各分支共享）"""
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE sessions SET summary=?, updated_at=? WHERE session_id=?",
                 (summary, time.time(), session_id),
@@ -230,21 +248,18 @@ class ContextStore:
             chain.append((cur, point))
             cur = parent_id
         chain.reverse()  # 根→该分支
+        # 累积继承：根全量 → 逐级追加自身增量 → 按下一级拐点截断（避免中间分支 archive 为空时丢失继承）
         rows: list[tuple[str, str]] = []
         for i, (bid, _point) in enumerate(chain):
-            is_last = i == len(chain) - 1
-            if is_last:
-                part = conn.execute(
-                    "SELECT kind, payload FROM message_archive WHERE session_id=? AND branch_id=? AND deleted=0 ORDER BY id",
-                    (session_id, bid),
-                ).fetchall()
-            else:
-                next_point = chain[i + 1][1]  # 该分支被下一级分叉的拐点
-                part = conn.execute(
-                    "SELECT kind, payload FROM message_archive WHERE session_id=? AND branch_id=? AND deleted=0 ORDER BY id LIMIT ?",
-                    (session_id, bid, next_point),
-                ).fetchall()
-            rows += part
+            own = conn.execute(
+                "SELECT kind, payload FROM message_archive WHERE session_id=? AND branch_id=? AND deleted=0 ORDER BY id",
+                (session_id, bid),
+            ).fetchall()
+            rows += own
+            if i != len(chain) - 1:  # 非最后分支：被下一级分叉截断
+                next_point = chain[i + 1][1]
+                if next_point is not None:
+                    rows = rows[:next_point]
         return rows
 
     async def branch_history(self, session_id: str, branch_id: str = "root") -> list[BaseMessage]:
@@ -252,7 +267,7 @@ class ContextStore:
         return await asyncio.to_thread(self._branch_history_sync, session_id, branch_id)
 
     def _branch_history_sync(self, session_id, branch_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             rows = self._collect_branch_rows(conn, session_id, branch_id)
         return messages_from_dict([json.loads(p) for (_k, p) in rows])
 
@@ -264,7 +279,7 @@ class ContextStore:
         return await asyncio.to_thread(self._load_view_sync, session_id, branch_id, keep_recent_turns)
 
     def _load_view_sync(self, session_id, branch_id, keep):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT system_prompt FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)
             ).fetchone()
@@ -277,11 +292,15 @@ class ContextStore:
         for kind, payload in rows:
             d = json.loads(payload)
             if kind == "summary":
-                summary = d.get("data", {}).get("content") or d.get("content")  # 最近一条覆盖
+                # 归档摘要消息 content 已带展示前缀；build_llm_context 会再加前缀，这里剥离避免双前缀
+                content = d.get("data", {}).get("content") or d.get("content")
+                if content and content.startswith("[对话历史摘要]\n"):
+                    content = content[len("[对话历史摘要]\n"):]
+                summary = content  # 最近一条覆盖
             else:
                 real_dicts.append(d)
         system = SystemMessage(content=system_prompt or _DEFAULT_SYSTEM_PROMPT)
-        base = [system] + messages_from_dict(real_dicts)
+        base = [system, *messages_from_dict(real_dicts)]
         if not summary:
             return base
         return build_llm_context(base, summary, keep)
@@ -291,7 +310,7 @@ class ContextStore:
         return await asyncio.to_thread(self._load_full_history_sync, session_id, branch_id)
 
     def _load_full_history_sync(self, session_id, branch_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             rows = self._collect_branch_rows(conn, session_id, branch_id)
         return messages_from_dict([json.loads(p) for (_k, p) in rows])
 
@@ -309,7 +328,7 @@ class ContextStore:
         if not isinstance(point, int) or point < 1:
             raise ValueError("分支拐点 point 需为正整数（父分支历史消息序号）")
         new_branch_id = str(uuid.uuid4())
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             parent = conn.execute(
                 "SELECT 1 FROM branches WHERE branch_id=? AND session_id=? AND status='active'",
                 (parent_id, session_id),
@@ -331,7 +350,7 @@ class ContextStore:
             )
         system_prompt = sp[0] if sp else ""
         system = SystemMessage(content=system_prompt or _DEFAULT_SYSTEM_PROMPT)
-        point_view = [system] + messages_from_dict([json.loads(p) for (_k, p) in rows[:point]])
+        point_view = [system, *messages_from_dict([json.loads(p) for (_k, p) in rows[:point]])]
         return new_branch_id, point_view
 
     async def list_branches(self, session_id: str) -> list[dict]:
@@ -339,9 +358,12 @@ class ContextStore:
         return await asyncio.to_thread(self._list_branches_sync, session_id)
 
     def _list_branches_sync(self, session_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
-                "SELECT branch_id, parent_id, branch_point_seq, name, created_at FROM branches WHERE session_id=? AND status='active' ORDER BY created_at",
+                (
+                    "SELECT branch_id, parent_id, branch_point_seq, name, created_at "
+                    "FROM branches WHERE session_id=? AND status='active' ORDER BY created_at"
+                ),
                 (session_id,),
             ).fetchall()
         return [
@@ -358,7 +380,7 @@ class ContextStore:
             bid = stack.pop()
             result.append(bid)
             for (child,) in conn.execute(
-                "SELECT branch_id FROM sessions WHERE session_id=? AND parent_id=? AND status='active'",
+                "SELECT branch_id FROM branches WHERE session_id=? AND parent_id=? AND status='active'",
                 (session_id, bid),
             ).fetchall():
                 stack.append(child)
@@ -369,7 +391,7 @@ class ContextStore:
         return await asyncio.to_thread(self._delete_branch_sync, session_id, branch_id)
 
     def _delete_branch_sync(self, session_id, branch_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             exists = conn.execute(
                 "SELECT 1 FROM branches WHERE branch_id=? AND session_id=? AND status='active'",
                 (branch_id, session_id),
@@ -393,7 +415,7 @@ class ContextStore:
         await asyncio.to_thread(self._delete_session_sync, session_id)
 
     def _delete_session_sync(self, session_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute("UPDATE sessions SET status='deleted' WHERE session_id=?", (session_id,))
             conn.execute("UPDATE branches SET status='deleted' WHERE session_id=?", (session_id,))
             conn.execute("UPDATE message_archive SET deleted=1 WHERE session_id=?", (session_id,))
@@ -403,7 +425,7 @@ class ContextStore:
         return await asyncio.to_thread(self._gc_purge_sync)
 
     def _gc_purge_sync(self):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             a = conn.execute("DELETE FROM message_archive WHERE deleted=1").rowcount
             b = conn.execute("DELETE FROM branches WHERE status='deleted'").rowcount
             s = conn.execute("DELETE FROM sessions WHERE status='deleted'").rowcount
@@ -417,7 +439,7 @@ class ContextStore:
     def _rename_session_sync(self, session_id, name):
         if not name or not name.strip():
             raise ValueError("会话名不能为空")
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute("UPDATE sessions SET name=?, updated_at=? WHERE session_id=?", (name.strip(), time.time(), session_id))
 
     async def rename_branch(self, session_id: str, branch_id: str, name: str) -> None:
@@ -427,7 +449,7 @@ class ContextStore:
     def _rename_branch_sync(self, session_id, branch_id, name):
         if not name or not name.strip():
             raise ValueError("分支名不能为空")
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             conn.execute(
                 "UPDATE branches SET name=? WHERE branch_id=? AND session_id=? AND status='active'",
                 (name.strip(), branch_id, session_id),
@@ -439,7 +461,7 @@ class ContextStore:
         return await asyncio.to_thread(self._load_summary_sync, session_id)
 
     def _load_summary_sync(self, session_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT summary FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)
             ).fetchone()
@@ -452,7 +474,7 @@ class ContextStore:
         return await asyncio.to_thread(self._load_system_prompt_sync, session_id)
 
     def _load_system_prompt_sync(self, session_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             row = conn.execute(
                 "SELECT system_prompt FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)
             ).fetchone()
@@ -465,7 +487,7 @@ class ContextStore:
         return await asyncio.to_thread(self._list_sessions_sync, user_id, tenant_id)
 
     def _list_sessions_sync(self, user_id, tenant_id):
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
                 """SELECT session_id, name, status, created_at, updated_at
                    FROM sessions WHERE user_id=? AND tenant_id=? AND status!='deleted'
@@ -485,9 +507,12 @@ class ContextStore:
         """
         if content is None:
             return
-        with sqlite3.connect(self._db_path) as conn:
+        with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, payload FROM message_archive WHERE session_id=? AND branch_id=? AND role='ai' AND kind='message' AND deleted=0 ORDER BY id DESC LIMIT 50",
+                (
+                    "SELECT id, payload FROM message_archive WHERE session_id=? AND branch_id=? AND role='ai' "
+                    "AND kind='message' AND deleted=0 ORDER BY id DESC LIMIT 50"
+                ),
                 (session_id, branch_id),
             ).fetchall()
             for row_id, payload in rows:

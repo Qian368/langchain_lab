@@ -49,7 +49,8 @@ ollama = ["langchain-ollama"]
 
 [project.scripts]
 main = "langchain_lab.main:main"
-serve_rag = "langchain_lab.rag.api.main_rag:serve"
+rag_server = "langchain_lab.rag.api.main_rag:serve"
+mcp_server = "langchain_lab.mcp.server.mcp_streamable_http_server:main"
 operation = "langchain_lab.rag.operation.script_1:main"
 temp = "langchain_lab.scratch.temp:temp"
 temp1 = "langchain_lab.scratch.temp_for_retriever:temp"

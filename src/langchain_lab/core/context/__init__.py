@@ -7,8 +7,8 @@
 职责边界：投影策略由运行时调用；持久化 I/O 由订阅者承担，运行时不引用 store。
 """
 
-from langchain_lab.core.context.context_store import ContextStore
 from langchain_lab.core.context.compressor import SessionCompressor
+from langchain_lab.core.context.context_store import ContextStore
 from langchain_lab.core.context.views import build_display_context, build_llm_context
 
 __all__ = [

@@ -43,7 +43,7 @@ def test_split_turns():
 def test_split_turns_skips_summary_message():
     """摘要消息（HumanMessage meta=summary）不当作真实轮"""
     msgs = _msgs_with_turns(2)
-    view = [msgs[0], HumanMessage(content="[对话历史摘要]\n摘要", additional_kwargs={"meta": "summary"})] + msgs[1:]
+    view = [msgs[0], HumanMessage(content="[对话历史摘要]\n摘要", additional_kwargs={"meta": "summary"}), *msgs[1:]]
     comp = _comp(k=1)
     assert len(comp.split_turns(view)) == 2  # 只数到 h0/a0, h1/a1 两轮
 
@@ -97,7 +97,12 @@ def test_build_llm_context_with_summary():
 def test_build_compress_input_prefix_preserved():
     """压缩请求 = 视图去掉最近 keep 轮【原封不动】（不过滤 system、不重排角色）+ 末尾固定 Human 指令"""
     comp = SessionCompressor(None, keep_recent_turns=2, bus=EventBus(), session_id="s1")
-    view = comp.build_llm_context(_msgs_with_turns(5), "摘要")
+    # build_compress_input 的输入是完整视图（System + 摘要 + 全部轮），不是 build_llm_context 的压缩输出
+    view = [
+        SystemMessage(content="sys"),
+        HumanMessage(content="[对话历史摘要]\n摘要", additional_kwargs={"meta": "summary"}),
+        *_msgs_with_turns(5)[1:],
+    ]
     request, early = comp.build_compress_input(view, 2)
     assert early == 3  # 压掉前 3 轮
     # 结构：System + Human摘要 + 前3轮原样 + 末尾 Human 压缩指令

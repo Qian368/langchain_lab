@@ -55,6 +55,7 @@ class _FakeLlm:
 
 @tool
 def _fake_echo(x: int) -> str:
+    """测试用 echo 工具：返回格式化后的入参"""
     return f"v{x}"
 
 
@@ -156,10 +157,10 @@ def test_supersede_soft_deletes_old_answer():
             store = ContextStore(os.path.join(td, "t.db"))
             sid = "s1"
             await store.ensure_session(sid, {"user_id": "u1", "tenant_id": "t1"}, system_prompt="sys", name="n")
-            store._append_archive_sync(sid, "root", "evt_h", [messages_to_dict(HumanMessage(content="h1"))])
-            store._append_archive_sync(sid, "root", "evt_a", [messages_to_dict(AIMessage(content="旧回答"))])
+            store._append_archive_sync(sid, "root", "evt_h", messages_to_dict([HumanMessage(content="h1")]))
+            store._append_archive_sync(sid, "root", "evt_a", messages_to_dict([AIMessage(content="旧回答")]))
             # 重跑产生新回答归档后，软删旧回答
-            store._append_archive_sync(sid, "root", "evt_a2", [messages_to_dict(AIMessage(content="新回答"))])
+            store._append_archive_sync(sid, "root", "evt_a2", messages_to_dict([AIMessage(content="新回答")]))
             store._supersede_sync(sid, "root", "旧回答")
             full = await store.load_full_history(sid, "root")  # 只读 deleted=0
             contents = [getattr(m, "content", None) for m in full]

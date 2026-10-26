@@ -9,11 +9,11 @@ from pydantic_settings import (
 )
 
 from langchain_lab.core.config.app_config import AppConfig
+from langchain_lab.core.config.app_schema.llm_models import LLMConfig
 from langchain_lab.core.config.app_schema.mcp_models import MCPSettings
 from langchain_lab.core.config.app_schema.project_models import ProjectSettings
 from langchain_lab.core.config.app_schema.rag_models import RagSettings
 from langchain_lab.core.config.app_schema.runtime_models import RuntimeSettings
-from langchain_lab.core.llm.llm_schema import LLMConfig
 
 
 class ConfigLoader(BaseSettings):

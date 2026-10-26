@@ -21,7 +21,10 @@ def test_ensure_session_and_view_new():
         store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
         store.subscribe_to_bus(bus)
         await store.ensure_session("s1", {"user_id": "u1", "tenant_id": "t1"}, system_prompt="sys")
-        bus.publish(Event(EventType.MESSAGES_ARCHIVED, "s1", {"branch_id": "root", "messages": messages_to_dict([HumanMessage(content="h0"), AIMessage(content="a0")])}))
+        bus.publish(Event(
+            EventType.MESSAGES_ARCHIVED, "s1",
+            {"branch_id": "root", "messages": messages_to_dict([HumanMessage(content="h0"), AIMessage(content="a0")])},
+        ))
         await bus.flush()
         view = await store.load_view("s1", "root", keep_recent_turns=6)
         assert view is not None
@@ -37,7 +40,14 @@ def test_view_rebuilds_after_compress():
         store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
         store.subscribe_to_bus(bus)
         await store.ensure_session("s1", {"user_id": "u1", "tenant_id": "t1"}, system_prompt="sys")
-        bus.publish(Event(EventType.MESSAGES_ARCHIVED, "s1", {"branch_id": "root", "messages": messages_to_dict([HumanMessage(content="h0"), AIMessage(content="a0"), HumanMessage(content="h1"), AIMessage(content="a1"), HumanMessage(content="h2"), AIMessage(content="a2")])}))
+        bus.publish(Event(
+            EventType.MESSAGES_ARCHIVED, "s1",
+            {"branch_id": "root", "messages": messages_to_dict([
+                HumanMessage(content="h0"), AIMessage(content="a0"),
+                HumanMessage(content="h1"), AIMessage(content="a1"),
+                HumanMessage(content="h2"), AIMessage(content="a2"),
+            ])},
+        ))
         bus.publish(Event(EventType.SUMMARY_ARCHIVED, "s1", {"summary": "摘要", "branch_id": "root"}))
         await bus.flush()
         view = await store.load_view("s1", "root", keep_recent_turns=2)
@@ -71,7 +81,13 @@ def test_create_branch_returns_point_view():
         store = ContextStore(Path(tempfile.mkdtemp()) / "s.db")
         store.subscribe_to_bus(bus)
         await store.ensure_session("s1", {"user_id": "u1", "tenant_id": "t1"}, "sys")
-        bus.publish(Event(EventType.MESSAGES_ARCHIVED, "s1", {"branch_id": "root", "messages": messages_to_dict([HumanMessage(content="h0"), AIMessage(content="a0"), HumanMessage(content="h1"), AIMessage(content="a1")])}))
+        bus.publish(Event(
+            EventType.MESSAGES_ARCHIVED, "s1",
+            {"branch_id": "root", "messages": messages_to_dict([
+                HumanMessage(content="h0"), AIMessage(content="a0"),
+                HumanMessage(content="h1"), AIMessage(content="a1"),
+            ])},
+        ))
         await bus.flush()
         new_id, point_view = await store.create_branch("s1", "root", 2, keep_recent_turns=6)
         assert point_view[0].content == "sys"

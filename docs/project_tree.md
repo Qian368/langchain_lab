@@ -1,6 +1,6 @@
 # 项目目录结构
 
-- 生成时间：`2026-10-23 02:58:22`
+- 生成时间：`2026-10-27 02:26:35`
 - 项目根目录：`E:\project-dev\ai-agent\practice\langchain_lab`
 
 ```text
@@ -12,7 +12,8 @@ langchain_lab/
 │   ├── llm.yaml
 │   ├── mcp.yaml
 │   ├── project.yaml
-│   └── rag.yaml
+│   ├── rag.yaml
+│   └── runtime.yaml
 ├── data/
 ├── docs/
 │   ├── pint流式响应单chunk.tool_call_chunks示例 .jsonc
@@ -24,32 +25,49 @@ langchain_lab/
 ├── src/
 │   ├── langchain_lab/
 │   │   ├── core/
+│   │   │   ├── api/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── control_api.py
+│   │   │   │   └── payload_validation.py
+│   │   │   ├── commands/
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── instruction_registry.py
 │   │   │   ├── config/
 │   │   │   │   ├── app_schema/
 │   │   │   │   │   ├── __init__.py
 │   │   │   │   │   ├── llm_models.py
 │   │   │   │   │   ├── mcp_models.py
 │   │   │   │   │   ├── project_models.py
-│   │   │   │   │   └── rag_models.py
+│   │   │   │   │   ├── rag_models.py
+│   │   │   │   │   └── runtime_models.py
 │   │   │   │   ├── ident_schema/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── _config.py
 │   │   │   │   ├── _scheme.py
 │   │   │   │   ├── app_config.py
 │   │   │   │   ├── config_core.py
+│   │   │   │   ├── env_expand.py
 │   │   │   │   ├── evented_model.py
 │   │   │   │   ├── ident_config.py
 │   │   │   │   └── loader.py
+│   │   │   ├── context/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── compressor.py
+│   │   │   │   ├── context_store.py
+│   │   │   │   └── views.py
 │   │   │   ├── llm/
-│   │   │   │   ├── llm.py
-│   │   │   │   └── llm_schema.py
+│   │   │   │   └── llm.py
 │   │   │   ├── tools/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── base_tools.py
 │   │   │   │   ├── tool_disclosure.py
 │   │   │   │   └── tool_middleware.py
 │   │   │   ├── __init__.py
+│   │   │   ├── agent_hooks.py
+│   │   │   ├── agent_runtime.py
 │   │   │   ├── agent_session.py
+│   │   │   ├── event_bus.py
+│   │   │   ├── events.py
 │   │   │   ├── messages.py
 │   │   │   └── pipeline.py
 │   │   ├── experiments/
@@ -61,7 +79,8 @@ langchain_lab/
 │   │   │   ├── exp5_lcel_pipeline.py
 │   │   │   ├── exp6_base_retrieve.py
 │   │   │   ├── exp7_rag_indexing.py
-│   │   │   └── exp8_rag_querying.py
+│   │   │   ├── exp8_rag_querying.py
+│   │   │   └── exp9_agent_runtime.py
 │   │   ├── mcp/
 │   │   │   ├── client/
 │   │   │   │   ├── __init__.py
@@ -116,10 +135,21 @@ langchain_lab/
 │   │   └── main.py
 │   └── tests/
 │       ├── unit_test/
-│       │   └── test_evented_model.py
+│       │   ├── test_agent_runtime.py
+│       │   ├── test_branch.py
+│       │   ├── test_chat_session.py
+│       │   ├── test_event_bus.py
+│       │   ├── test_evented_model.py
+│       │   ├── test_regenerate.py
+│       │   ├── test_session_compressor.py
+│       │   ├── test_session_store.py
+│       │   └── test_session_tree.py
 │       └── test_retriever.py
+├── .env.example
 ├── .gitignore
 ├── .python-version
+├── _diag_t.py
+├── _diag_turn.py
 ├── compose.yml
 ├── gen_tree.py
 ├── pyproject.toml

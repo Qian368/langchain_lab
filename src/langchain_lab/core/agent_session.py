@@ -22,8 +22,10 @@
 import asyncio
 import inspect
 import json
+from collections.abc import Awaitable, Callable
 from typing import cast
 
+from langchain.tools import BaseTool
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -33,9 +35,9 @@ from langchain_core.messages import (
     ToolMessage,
     messages_to_dict,
 )
-from langchain.tools import BaseTool
 
 from langchain_lab.core.agent_hooks import AgentHooks
+from langchain_lab.core.commands.instruction_registry import get_spec, handler_for
 from langchain_lab.core.context.compressor import SessionCompressor
 from langchain_lab.core.event_bus import EventChannel
 from langchain_lab.core.events import Event, EventType
@@ -61,12 +63,12 @@ class ChatSession:
         max_tool_calls: int = 4,  # 单轮最大工具调用（入口按 runtime.yaml 注入）
         history: list[BaseMessage] | None = None,  # 恢复：入口从 archive 构建的 llm 视图注入（含 system/摘要），无则新建
         summary: str | None = None,  # 恢复：会话级压缩摘要
-        branch_loader=None,  # async (branch_id)->list|None：加载指定分支视图（入口用 context_store 实现）
-        branch_lister=None,  # async ()->list[dict]：列分支
-        branch_creator=None,  # async (parent_id, point)->(new_id, point_view)：建分支，返回新 id 与拐点视图
-        branch_deleter=None,  # async (branch_id)->list[str]：删除分支（级联软删子树），返回被删 id 列表
-        session_renamer=None,  # async (name)->None：重命名会话（当前分支为 root 时）
-        branch_renamer=None,  # async (branch_id, name)->None：重命名分支
+        branch_loader: Callable[[str], Awaitable[list[BaseMessage] | None]] | None = None,  # async (branch_id)->list|None
+        branch_lister: Callable[[], Awaitable[list[dict]]] | None = None,  # async ()->list[dict]：列分支
+        branch_creator: Callable[[str, int], Awaitable[tuple[str, list[BaseMessage]]]] | None = None,  # async (parent_id,point)->(new_id,view)
+        branch_deleter: Callable[[str], Awaitable[list[str]]] | None = None,  # async (branch_id)->list[str]：删除分支子树，返回被删 id 列表
+        session_renamer: Callable[[str], Awaitable[None]] | None = None,  # async (name)->None：重命名会话（当前分支为 root 时）
+        branch_renamer: Callable[[str, str], Awaitable[None]] | None = None,  # async (branch_id, name)->None：重命名分支
     ):
         self._session_id = session_id
         self._session_ctx = session_ctx
@@ -123,6 +125,8 @@ class ChatSession:
         payload = event.payload or {}
         force = bool(payload.get("force", False))
         keep = payload.get("keep")
+        if self._compressor is None:
+            return
         async with self._compress_lock:
             new_summary = await self._compressor.maybe_compress(
                 self._messages, self._summary, force=force, keep_turns=keep
@@ -130,7 +134,8 @@ class ChatSession:
             if new_summary is not None:
                 self._summary = new_summary
                 # 视图重建：早期轮从 _messages 移出（已由 MESSAGES_ARCHIVED 增量归档），摘要置顶
-                self._messages = self._compressor.build_llm_context(self._messages, new_summary)
+                # 保留轮数：手动提前压缩传 payload keep，否则 None→构造默认（与 maybe_compress 口径一致）
+                self._messages = self._compressor.build_llm_context(self._messages, new_summary, keep)
                 # 摘要消息按当前分支归档（store 订阅 SUMMARY_ARCHIVED 落 archive kind=summary，event_id 幂等）
                 self._emit(
                     EventType.SUMMARY_ARCHIVED,
@@ -146,37 +151,39 @@ class ChatSession:
         避免与通用控制指令的双重 turn 边界与 flush。
         """
         payload = event.payload or {}
-        if payload.get("action") == "regenerate":
+        spec = get_spec(payload.get("action"))
+        if spec is not None and spec.get("standalone"):
             return self._do_regenerate()
         return self._handle_command_event(event)
 
     async def _handle_command_event(self, event: Event) -> None:
-        """按 action 处理分支/删除/重命名等控制指令；不解析原始文本"""
+        """按注册表 name 通用分发控制指令；不解析原始文本（适配器已转语义化 action）
+
+        action 合法性与 handler 都取自指令注册表（commands/instruction_registry.py）：
+        get_spec 判合法性，handler_for → getattr 取分派方法，不散落 if/elif 与指令名字符串；
+        新增指令只需在注册表加一条，运行时自动多一个可用动作。
+        """
         self._emit(EventType.AGENT_TURN_START)
         payload = event.payload or {}
         action = payload.get("action")
-        try:
-            if action == "branch_list":
-                await self._do_branch_list()
-            elif action == "branch_create":
-                await self._do_branch_create(payload.get("point"))
-            elif action == "branch_switch":
-                await self._do_branch_switch(payload.get("branch_id"))
-            elif action == "branch_delete":
-                await self._do_branch_delete(payload.get("branch_id"))
-            elif action == "rename":
-                await self._do_rename(payload.get("name"))
-            else:
-                self._notice(f"未知指令 action={action}")
+        if get_spec(action) is None:
+            self._notice(f"未知指令 action={action}（可用指令见 /help）")
             self._emit_session_state()
-        except Exception as exc:  # noqa: BLE001
+            self._emit(EventType.AGENT_TURN_DONE)
+            await self._bus.flush()
+            return
+        try:
+            handler = getattr(self, handler_for(action))
+            await handler(payload)
+            self._emit_session_state()
+        except Exception as exc:
             self._emit(EventType.ERROR_OCCURRED, payload={"error": repr(exc), "phase": "command"})
         finally:
             self._emit(EventType.AGENT_TURN_DONE)
             await self._bus.flush()
 
     # —— 分支操作（走注入回调，运行时不碰持久化实现）——
-    async def _do_branch_list(self) -> None:
+    async def _do_branch_list(self, payload) -> None:
         if self._branch_lister is None:
             self._notice("无上下文存储，无法列出分支")
             return
@@ -191,12 +198,13 @@ class ChatSession:
         ]
         self._notice("分支列表：\n" + "\n".join(lines))
 
-    async def _do_branch_create(self, point) -> None:
+    async def _do_branch_create(self, payload) -> None:
         """创建子分支：store 从 archive 构建拐点视图（System + 前 point 轮真实消息），返回 (new_id, point_view)
 
         支持压缩后从历史轮次分叉：拐点视图基于 archive 无损全量真实消息，而非当前视图快照切片（
         压缩后早期轮已移出视图，旧实现 _messages[:point+1] 在拐点早于压缩点时静默错误）。
         """
+        point = payload.get("point")
         if not isinstance(point, int) or point < 1:
             self._notice("用法：branch_create 需 point>=1（对话消息序号）")
             return
@@ -212,7 +220,8 @@ class ChatSession:
         self._branch_id = new_branch
         self._notice(f"已创建分支 {new_branch}（拐点 seq={point}），后续输入进入该分支")
 
-    async def _do_branch_switch(self, branch_id) -> None:
+    async def _do_branch_switch(self, payload) -> None:
+        branch_id = payload.get("branch_id")
         if not branch_id:
             self._notice("用法：branch_switch 需 branch_id")
             return
@@ -231,8 +240,9 @@ class ChatSession:
         self._messages = restored
         self._notice(f"已切换到分支 {branch_id}（{len(restored) - 1} 条对话）")
 
-    async def _do_branch_delete(self, branch_id) -> None:
+    async def _do_branch_delete(self, payload) -> None:
         """删除分支（级联软删子树）。删 root=删整个会话（发 SESSION_DELETED，入口退出）；删当前分支则切回根分支"""
+        branch_id = payload.get("branch_id")
         if not branch_id:
             self._notice("用法：branch_delete 需 branch_id（root=删除整个会话）")
             return
@@ -253,16 +263,21 @@ class ChatSession:
             self._emit(EventType.SESSION_DELETED, payload={"branch_id": branch_id})
         else:
             self._branch_id = "root"
+            if self._branch_loader is None:
+                self._messages = [SystemMessage(content=self._messages[0].content)]
+                self._notice("当前分支已删除，已切回根分支（无上下文存储，重置为新会话）")
+                return
             try:
                 restored = await self._branch_loader("root")
                 self._messages = restored if restored else [SystemMessage(content=self._messages[0].content)]
                 self._notice("当前分支已删除，已切回根分支")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 self._messages = [SystemMessage(content=self._messages[0].content)]
                 self._notice("当前分支已删除，已切回根分支（视图重建失败，重置为新会话）")
 
-    async def _do_rename(self, name) -> None:
+    async def _do_rename(self, payload) -> None:
         """重命名：当前分支为 root → 会话名；否则分支名"""
+        name = payload.get("name")
         if not name or not name.strip():
             self._notice("用法：rename 需非空名字")
             return
@@ -306,7 +321,7 @@ class ChatSession:
         base_len = h_idx + 1 + len(tool_results)
         self._messages = self._messages[: h_idx + 1] + tool_results
         # 条件化注解：仅该轮有工具调用时注入（副本临时，不持久化）
-        extra: list[SystemMessage] | None = None
+        extra: list[BaseMessage] | None = None
         if tool_results:
             extra = [
                 SystemMessage(
@@ -336,7 +351,7 @@ class ChatSession:
                 EventType.TURN_COMPLETE,
                 payload={"branch_id": self._branch_id, "summary": self._summary, "regenerated": True},
             )
-        except Exception as exc:  # noqa: BLE001 - 面向网络服务化，运行时异常必须抛给订阅者
+        except Exception as exc:
             self._emit(EventType.ERROR_OCCURRED, payload={"error": repr(exc), "phase": "regenerate"})
         finally:
             self._emit(EventType.AGENT_TURN_DONE)
@@ -375,7 +390,7 @@ class ChatSession:
                 EventType.TURN_COMPLETE,
                 payload={"branch_id": self._branch_id, "summary": self._summary},
             )
-        except Exception as exc:  # noqa: BLE001 - 面向网络服务化，运行时异常必须抛给订阅者
+        except Exception as exc:
             self._emit(EventType.ERROR_OCCURRED, payload={"error": repr(exc), "phase": "agent_turn"})
         finally:
             self._emit(EventType.AGENT_TURN_DONE)
@@ -386,11 +401,13 @@ class ChatSession:
     def _archive_new_messages(self, start_idx: int) -> None:
         """增量归档本轮新增真实消息（human/ai/tool，排除 system 与 meta=summary 摘要），append 落库"""
         new_msgs = self._messages[start_idx:]
-        real = [
-            messages_to_dict(m)
-            for m in new_msgs
-            if not (isinstance(m, SystemMessage) or m.additional_kwargs.get("meta") == "summary")
-        ]
+        real = messages_to_dict(
+            [
+                m
+                for m in new_msgs
+                if not (isinstance(m, SystemMessage) or m.additional_kwargs.get("meta") == "summary")
+            ]
+        )
         if real:
             self._emit(
                 EventType.MESSAGES_ARCHIVED,
@@ -472,9 +489,11 @@ class ChatSession:
 
             # —— 控制钩子② post_llm：LLM 合法输出校验/替换（None=原样，非None=替换，raise=拒绝）——
             full_chunk = await self._run_hook(self._hooks.post_llm, full_chunk)
+            if full_chunk is None:
+                break
             self._messages.append(full_chunk)
             # 完整消息事件：payload 用 messages_to_dict（JSON 可序列化，MQ 契约）；展示层看流式+状态，不依赖此 payload 内容
-            self._emit(EventType.ASSISTANT_MESSAGE_EMITTED, payload=messages_to_dict(full_chunk))
+            self._emit(EventType.ASSISTANT_MESSAGE_EMITTED, payload=messages_to_dict([full_chunk]))
 
             # —— 上限终止：LLM 收尾轮多一次自增，工具计数顶格停在上限 ——
             if llm_loop_count > self._max_llm_loop or tool_call_count >= self._max_tool_calls:
