@@ -51,7 +51,30 @@ class CommandResponse(BaseModel):
     error: str | None = None
 
 
+class ConfigRequest(BaseModel):
+    """配置面覆盖载荷（按域路径，如 {"context": {"keep_recent_turns": 8}} 或 {"llm": {"default_instance": "zhipuai"}}）"""
+    overrides: dict = Field(default_factory=dict, description="用户/租户配置覆盖，经 ConfigResolver 合并出 EffectiveConfig")
+
+
 # ---------- 端点 ----------
+@app.get("/config")
+def get_config_endpoint() -> dict:
+    """配置面：读取当前运行时（身份维度）的用户/租户配置覆盖"""
+    return {"config": _get_runtime().get_user_config()}
+
+
+@app.put("/config", response_model=CommandResponse)
+async def put_config_endpoint(req: ConfigRequest) -> CommandResponse:
+    """配置面：写入用户/租户配置覆盖（先校验有效性，新会话生效）"""
+    try:
+        _get_runtime().set_user_config(req.overrides)
+    except (ValueError, ValidationError) as exc:
+        return CommandResponse(ok=False, error=f"配置校验失败: {exc}")
+    except RuntimeError as exc:
+        return CommandResponse(ok=False, error=str(exc))
+    return CommandResponse(ok=True, data={"applied": True, "overrides": req.overrides})
+
+
 @app.get("/instructions")
 def instructions() -> dict:
     """指令发现：返回注册表公开契约（含别名/说明/载荷 schema，前端帮助与表单渲染）"""

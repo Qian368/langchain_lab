@@ -18,6 +18,8 @@ import uuid
 from langchain_lab.core.bus.event_bus import EventBus, EventChannel
 from langchain_lab.core.bus.events import Event, EventType
 from langchain_lab.core.config.config_core import get_config
+from langchain_lab.core.config.config_resolver import resolve_config
+from langchain_lab.core.config.user_config import UserConfigStore
 from langchain_lab.core.context.compressor import SessionCompressor
 from langchain_lab.core.context.context_store import ContextStore
 from langchain_lab.core.llm.llm import build_llm, get_llm
@@ -31,18 +33,25 @@ class AgentRuntime:
     """后端运行时宿主：实例池 + 生命周期 + 统一操作面 + 全局配置注入"""
 
     def __init__(self, *, session_ctx: dict | None = None, db_path: str | None = None) -> None:
-        self._cfg = get_config()
+        self._cfg = get_config()  # 全局配置（部署级默认）
         self._session_ctx = session_ctx or dict(self._cfg.project.session_ctx)  # 身份字典（含 user/tenant）
-        self._agent_cfg = self._cfg.runtime.agent
-        self._comp_cfg = self._cfg.context.compression  # 压缩执行配置已归 context 域（compression 子配置）
-        self._context_cfg = self._cfg.context  # 上下文策略（keep_recent_turns 下限 + headroom）
+        # 持久化路径先取全局默认（配置面覆盖后可能不同，但存储路径本身固定）
+        self._db_path = str(db_path or self._cfg.runtime.agent.session_db_path)
+        # —— 配置面：按身份读用户/租户覆盖 → 覆盖链合并出 EffectiveConfig（全局 → 租户 → 用户）——
+        self._user_store = UserConfigStore(self._db_path)
+        _tenant = self._session_ctx.get("tenant_id", "")
+        _user = self._session_ctx.get("user_id", "")
+        self._overrides = self._user_store.get(_tenant, _user)
+        self._effective = resolve_config(self._cfg, self._overrides)
+        self._agent_cfg = self._effective.runtime.agent
+        self._comp_cfg = self._effective.context.compression  # 压缩执行配置已归 context 域
+        self._context_cfg = self._effective.context  # 上下文策略（keep_recent_turns 下限 + headroom）
         self._keep_recent_turns = self._context_cfg.keep_recent_turns
-        # 保留预算 = 主对话 LLM 上下文窗口 × (1 - headroom)；窗口来自 llm 配置（模型能力，跟模型走）
-        _insts = self._cfg.llm.instances
-        _default = self._cfg.llm.default_instance
+        # 保留预算 = 主对话 LLM 上下文窗口 × (1 - headroom)；窗口来自 effective llm 配置（模型能力，跟模型走）
+        _insts = self._effective.llm.instances
+        _default = self._effective.llm.default_instance
         _main = _insts.get(_default) if _default else (next(iter(_insts.values())) if _insts else None)
         self._retention_budget = self._context_cfg.retention_budget(_main.context_window if _main else 128000)
-        self._db_path = str(db_path or self._agent_cfg.session_db_path)
         self._bus: EventChannel = EventBus()
         self._store = ContextStore(self._db_path)
         self._store.subscribe_to_bus(self._bus)  # 持久化订阅者（归档/压缩/作废落库）
@@ -109,6 +118,24 @@ class AgentRuntime:
         self._require(session_id)
         self._bus.publish(Event(EventType.COMPRESS_REQUESTED, session_id, {"force": force, "keep": keep}))
 
+    # —— 配置面：用户/租户配置读写（覆盖链 → effective，新会话生效；已存在会话不受影响）——
+    def get_user_config(self) -> dict:
+        """返回当前运行时（身份维度）的用户/租户配置覆盖"""
+        return dict(self._overrides)
+
+    def set_user_config(self, overrides: dict) -> None:
+        """写入用户/租户配置覆盖：先校验能合并出有效配置（无效抛错不落库），成功则刷新 effective"""
+        candidate = resolve_config(self._cfg, overrides)  # 无效覆盖在此抛 ValidationError
+        _tenant = self._session_ctx.get("tenant_id", "")
+        _user = self._session_ctx.get("user_id", "")
+        self._user_store.set(_tenant, _user, overrides)
+        self._overrides = dict(overrides)
+        self._effective = candidate
+        self._agent_cfg = candidate.runtime.agent
+        self._comp_cfg = candidate.context.compression
+        self._context_cfg = candidate.context
+        self._keep_recent_turns = self._context_cfg.keep_recent_turns
+
     # —— 关闭（停机语义：关全部会话 + channel.close + 关 MCP 长连接）——
     async def close(self) -> None:
         for chat in self._sessions.values():
@@ -153,10 +180,10 @@ class AgentRuntime:
     def _build_compressor(self, session_id: str) -> SessionCompressor | None:
         if not self._comp_cfg.enabled:
             return None
-        inst_name = self._comp_cfg.summarize_model or self._cfg.llm.default_instance
-        if not inst_name or inst_name not in self._cfg.llm.instances:
+        inst_name = self._comp_cfg.summarize_model or self._effective.llm.default_instance
+        if not inst_name or inst_name not in self._effective.llm.instances:
             raise ValueError(f"压缩摘要模型实例 '{inst_name}' 未在 config/llm.yaml 中配置")
-        summarize_llm = build_llm(self._cfg.llm.instances[inst_name])
+        summarize_llm = build_llm(self._effective.llm.instances[inst_name])
         return SessionCompressor(
             summarize_llm=summarize_llm,
             keep_recent_turns=self._keep_recent_turns,

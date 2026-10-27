@@ -44,6 +44,8 @@ def build_llm(cfg: LLMInstanceConfig):
         kwargs["timeout"] = cfg.timeout
     if cfg.max_retries is not None:
         kwargs["max_retries"] = cfg.max_retries
+    if cfg.reasoning_effort is not None:
+        kwargs["reasoning_effort"] = cfg.reasoning_effort  # 思考深度（reasoning 模型，DeepSeek/OpenAI o 系）
     if cfg.extra_headers:
         kwargs["extra_headers"] = cfg.extra_headers
     try:

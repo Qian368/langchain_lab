@@ -1,4 +1,4 @@
-"""ChatSession：消息总线上的 Agent 会话 actor（面向网络服务化，事件驱动）
+﻿"""ChatSession：消息总线上的 Agent 会话 actor（面向网络服务化，事件驱动）
 
 - 输入事件化：定向订阅 USER_MESSAGE_SUBMITTED / COMPRESS_REQUESTED / SESSION_COMMAND（session_id 定向，O(1) 投递）
 - 不解析用户输入：指令的识别与合法性校验由客户端/适配器完成，转成语义化事件后发布；运行时只响应事件
@@ -39,7 +39,8 @@ from langchain_core.messages import (
 
 from langchain_lab.core.bus.event_bus import EventChannel
 from langchain_lab.core.bus.events import Event, EventType
-from langchain_lab.core.commands.instruction_registry import get_spec, handler_for
+from langchain_lab.core.commands.command_router import CommandRouter
+from langchain_lab.core.commands.instruction_registry import get_spec
 from langchain_lab.core.context.compressor import SessionCompressor
 from langchain_lab.core.runtime.agent_hooks import AgentHooks
 from langchain_lab.core.tools.tool_disclosure import get_disclosure_tools
@@ -70,6 +71,7 @@ class ChatSession:
         branch_deleter: Callable[[str], Awaitable[list[str]]] | None = None,  # async (branch_id)->list[str]：删除分支子树，返回被删 id 列表
         session_renamer: Callable[[str], Awaitable[None]] | None = None,  # async (name)->None：重命名会话（当前分支为 root 时）
         branch_renamer: Callable[[str, str], Awaitable[None]] | None = None,  # async (branch_id, name)->None：重命名分支
+        router: CommandRouter | None = None,  # 指令协作者（管理类指令分发）；默认独立实例
     ):
         self._session_id = session_id
         self._session_ctx = session_ctx
@@ -92,10 +94,68 @@ class ChatSession:
         self._branch_renamer = branch_renamer
         self._compress_lock = asyncio.Lock()  # 压缩串行化（自动/手动并发不竞态）
         self._actual_tokens = 0  # 累计实际 token（每轮流式 usage_metadata 累加），自动压缩预算判断用
+        self._router = router or CommandRouter()  # 指令协作者（branch/rename/update-compressor）
         # 订阅输入事件（定向订阅自己的 session_id，O(1) 投递，不被其他会话事件触发）
         bus.subscribe(self._on_user_message, EventType.USER_MESSAGE_SUBMITTED, session_id=self._session_id)
         bus.subscribe(self._on_compress_requested, EventType.COMPRESS_REQUESTED, session_id=self._session_id)
         bus.subscribe(self._on_command, EventType.SESSION_COMMAND, session_id=self._session_id)
+
+    # —— 命令目标接口（SessionCommandTarget，供 CommandRouter 操作会话，解耦反向依赖）——
+    @property
+    def messages(self) -> list[BaseMessage]:
+        return self._messages
+
+    @messages.setter
+    def messages(self, value: list[BaseMessage]) -> None:
+        self._messages = value
+
+    @property
+    def branch_id(self) -> str:
+        return self._branch_id
+
+    @branch_id.setter
+    def branch_id(self, value: str) -> None:
+        self._branch_id = value
+
+    @property
+    def compressor(self) -> SessionCompressor | None:
+        return self._compressor
+
+    @property
+    def branch_lister(self) -> Callable[[], Awaitable[list[dict]]] | None:
+        return self._branch_lister
+
+    @property
+    def branch_creator(self) -> Callable[[str, int], Awaitable[tuple[str, list[BaseMessage]]]] | None:
+        return self._branch_creator
+
+    @property
+    def branch_loader(self) -> Callable[[str], Awaitable[list[BaseMessage] | None]] | None:
+        return self._branch_loader
+
+    @property
+    def branch_deleter(self) -> Callable[[str], Awaitable[list[str]]] | None:
+        return self._branch_deleter
+
+    @property
+    def session_renamer(self) -> Callable[[str], Awaitable[None]] | None:
+        return self._session_renamer
+
+    @property
+    def branch_renamer(self) -> Callable[[str, str], Awaitable[None]] | None:
+        return self._branch_renamer
+
+    def notice(self, text: str) -> None:
+        self._notice(text)
+
+    def emit(self, event_type: EventType, payload: dict | None = None) -> None:
+        self._emit(event_type, payload)
+
+    async def flush(self) -> None:
+        await self._bus.flush()
+
+    def emit_session_state(self) -> None:
+        self._emit_session_state()
 
     # —— 控制钩子执行器（统一返回值语义）——
     @staticmethod
@@ -160,174 +220,15 @@ class ChatSession:
     def _on_command(self, event: Event):
         """订阅控制指令事件（适配器已解析+校验，运行时只按 action 响应）
 
-        regenerate 为独立路径（自带 turn 边界/归档/作废/flush），不从 _handle_command_event 的通用 try 走，
-        避免与通用控制指令的双重 turn 边界与 flush。
+        regenerate 为独立路径（自带 turn 边界/归档/作废/flush），不走 CommandRouter 的通用分发，
+        避免与通用控制指令的双重 turn 边界与 flush；其余管理类指令委托 CommandRouter 实现。
         """
         payload = event.payload or {}
         spec = get_spec(payload.get("action"))
         if spec is not None and spec.get("standalone"):
             return self._do_regenerate()
-        return self._handle_command_event(event)
+        return self._router.handle(self, event)
 
-    async def _handle_command_event(self, event: Event) -> None:
-        """按注册表 name 通用分发控制指令；不解析原始文本（适配器已转语义化 action）
-
-        action 合法性与 handler 都取自指令注册表（commands/instruction_registry.py）：
-        get_spec 判合法性，handler_for → getattr 取分派方法，不散落 if/elif 与指令名字符串；
-        新增指令只需在注册表加一条，运行时自动多一个可用动作。
-        """
-        self._emit(EventType.AGENT_TURN_START)
-        payload = event.payload or {}
-        action = payload.get("action")
-        if get_spec(action) is None:
-            self._notice(f"未知指令 action={action}（可用指令见 /help）")
-            self._emit_session_state()
-            self._emit(EventType.AGENT_TURN_DONE)
-            await self._bus.flush()
-            return
-        try:
-            handler = getattr(self, handler_for(action))
-            await handler(payload)
-            self._emit_session_state()
-        except Exception as exc:
-            self._emit(EventType.ERROR_OCCURRED, payload={"error": repr(exc), "phase": "command"})
-        finally:
-            self._emit(EventType.AGENT_TURN_DONE)
-            await self._bus.flush()
-
-    # —— 分支操作（走注入回调，运行时不碰持久化实现）——
-    async def _do_branch_list(self, payload) -> None:
-        if self._branch_lister is None:
-            self._notice("无上下文存储，无法列出分支")
-            return
-        branches = await self._branch_lister()
-        if not branches:
-            self._notice("暂无分支")
-            return
-        lines = [
-            f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}  {b.get('name', '')}"
-            + (" *" if b["branch_id"] == self._branch_id else "")
-            for b in branches
-        ]
-        self._notice("分支列表：\n" + "\n".join(lines))
-
-    async def _do_branch_create(self, payload) -> None:
-        """创建子分支：store 从 archive 构建拐点视图（System + 前 point 轮真实消息），返回 (new_id, point_view)
-
-        支持压缩后从历史轮次分叉：拐点视图基于 archive 无损全量真实消息，而非当前视图快照切片（
-        压缩后早期轮已移出视图，旧实现 _messages[:point+1] 在拐点早于压缩点时静默错误）。
-        """
-        point = payload.get("point")
-        if not isinstance(point, int) or point < 1:
-            self._notice("用法：branch_create 需 point>=1（对话消息序号）")
-            return
-        if self._branch_creator is None:
-            self._notice("无上下文存储，无法创建分支")
-            return
-        try:
-            new_branch, point_view = await self._branch_creator(self._branch_id, point)
-        except ValueError as exc:
-            self._notice(str(exc))  # 拐点越界等，交给 store 校验后提示
-            return
-        self._messages = point_view
-        self._branch_id = new_branch
-        self._notice(f"已创建分支 {new_branch}（拐点 seq={point}），后续输入进入该分支")
-
-    async def _do_branch_switch(self, payload) -> None:
-        branch_id = payload.get("branch_id")
-        if not branch_id:
-            self._notice("用法：branch_switch 需 branch_id")
-            return
-        if self._branch_loader is None:
-            self._notice("无上下文存储，无法切换分支")
-            return
-        try:
-            restored = await self._branch_loader(branch_id)
-        except ValueError as exc:
-            self._notice(str(exc))
-            return
-        if restored is None:
-            self._notice(f"分支 {branch_id} 不存在或不属于本会话")
-            return
-        self._branch_id = branch_id
-        self._messages = restored
-        self._notice(f"已切换到分支 {branch_id}（{len(restored) - 1} 条对话）")
-
-    async def _do_branch_delete(self, payload) -> None:
-        """删除分支（级联软删子树）。删 root=删整个会话（发 SESSION_DELETED，入口退出）；删当前分支则切回根分支"""
-        branch_id = payload.get("branch_id")
-        if not branch_id:
-            self._notice("用法：branch_delete 需 branch_id（root=删除整个会话）")
-            return
-        if self._branch_deleter is None:
-            self._notice("无上下文存储，无法删除分支")
-            return
-        try:
-            deleted = await self._branch_deleter(branch_id)
-        except ValueError as exc:
-            self._notice(str(exc))
-            return
-        self._notice(f"已删除分支 {branch_id}（含 {len(deleted) - 1} 个后代分支）")
-        if self._branch_id not in deleted:
-            return
-        # 当前分支被删：root 被删=删整个会话；否则切回根分支
-        if branch_id == "root" or "root" in deleted:
-            self._notice("根分支（整个会话）已删除，本次会话结束")
-            self._emit(EventType.SESSION_DELETED, payload={"branch_id": branch_id})
-        else:
-            self._branch_id = "root"
-            if self._branch_loader is None:
-                self._messages = [SystemMessage(content=self._messages[0].content)]
-                self._notice("当前分支已删除，已切回根分支（无上下文存储，重置为新会话）")
-                return
-            try:
-                restored = await self._branch_loader("root")
-                self._messages = restored if restored else [SystemMessage(content=self._messages[0].content)]
-                self._notice("当前分支已删除，已切回根分支")
-            except Exception:
-                self._messages = [SystemMessage(content=self._messages[0].content)]
-                self._notice("当前分支已删除，已切回根分支（视图重建失败，重置为新会话）")
-
-    async def _do_rename(self, payload) -> None:
-        """重命名：当前分支为 root → 会话名；否则分支名"""
-        name = payload.get("name")
-        if not name or not name.strip():
-            self._notice("用法：rename 需非空名字")
-            return
-        name = name.strip()
-        if self._branch_id == "root":
-            if self._session_renamer is None:
-                self._notice("无上下文存储，无法重命名会话")
-                return
-            await self._session_renamer(name)
-            self._notice(f"会话已重命名为「{name}」")
-        else:
-            if self._branch_renamer is None:
-                self._notice("无上下文存储，无法重命名分支")
-                return
-            await self._branch_renamer(self._branch_id, name)
-            self._notice(f"分支 {self._branch_id} 已重命名为「{name}」")
-
-    async def _do_update_compressor(self, payload) -> None:
-        """更新上下文压缩器配置：保留轮数下限 + 保留预算（token）"""
-        keep_recent_turns = payload.get("keep_recent_turns")
-        retention_budget = payload.get("retention_budget")
-
-        if not isinstance(keep_recent_turns, int) or keep_recent_turns < 1:
-            self._notice("keep_recent_turns 必须是 ≥1 的整数")
-            return
-        if not isinstance(retention_budget, int) or retention_budget < 1:
-            self._notice("retention_budget 必须是 ≥1 的整数（token）")
-            return
-        if keep_recent_turns * 64 > retention_budget:
-            self._notice("保留轮数对应的 token 估算不能超过 retention_budget")
-
-        if self._compressor is None:
-            self._notice("压缩器实例未初始化，无法更新配置")
-            return
-
-        self._compressor.update_config(keep_recent_turns=keep_recent_turns, retention_budget=retention_budget)
-        self._notice(f"压缩器配置已更新：keep_recent_turns={keep_recent_turns}, retention_budget={retention_budget}")
 
     # —— 重跑：只允许当前最后一条人类消息对应轮，复用工具结果，条件化注解，新回答归档、旧回答作废 ——
     async def _do_regenerate(self) -> None:
