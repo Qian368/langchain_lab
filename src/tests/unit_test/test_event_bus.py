@@ -1,8 +1,9 @@
 """事件总线单测：同步派发 / async handler+flush / 类型隔离 / 多会话过滤"""
+
 import asyncio
 
-from langchain_lab.core.event_bus import EventBus
-from langchain_lab.core.events import Event, EventType
+from langchain_lab.core.bus.event_bus import EventBus
+from langchain_lab.core.bus.events import Event, EventType
 
 
 def test_sync_handler_receives_event():
@@ -31,6 +32,7 @@ def test_subscription_scoped_by_event_type():
 
 def test_async_handler_flushed():
     """async handler 后台执行，publish 返回时未完成；flush 后完成（落库语义）"""
+
     async def scenario():
         bus = EventBus()
         got: list[str] = []

@@ -1,0 +1,11 @@
+# 上下文管理配置（产品策略 + 压缩执行，独立一域，由 ConfigLoader 统一加载）
+# 与模型窗口解耦：模型窗口 context_window 在 config/llm.yaml（模型能力，跟模型走）
+# 与运行时解耦：压缩执行配置也在此，运行时只关心 Agent 行为（config/runtime.yaml）
+context:
+  keep_recent_turns: 6   # 压缩后保留的最近轮数（下限；LLM 视图只保留最近 N 轮 + 摘要置顶）
+  headroom_ratio: 0.3    # 预留比例（生成余量+system+摘要占模型窗口）；保留预算 = 窗口 × (1 - 比例)
+
+  compression:
+    enabled: true          # 是否启用上下文压缩
+    summarize_model: deepseek  # 压缩摘要用的 LLM 实例名（对应 config/llm.yaml 的 instances 键）
+    summarize_prompt: null # 压缩指令文本（HumanMessage 追加在压缩请求末尾；null 用内置默认）

@@ -8,6 +8,7 @@
 - 运行时路由：_handle_command_event 按 name 查 handler_for → getattr(self, ...) 通用分发，
   不散落 if/elif 与指令名字符串
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -78,6 +79,27 @@ INSTRUCTION_SPECS: dict[str, dict[str, Any]] = {
         },
         "handler": "_do_rename",
     },
+    "update-compressor": {
+        "aliases": [":update-compressor", "/update-compressor"],
+        "description": "提供上下文压缩器配置使用",
+        "scope": "session",
+        "payload": {
+            "retention_budget": {
+                "type": "integer",
+                "minimum": 1,
+                "required": True,
+                "description": "压缩后保留预算（token）；= 模型窗口 × (1 - headroom)，可手动覆盖",
+            },
+            "keep_recent_turns": {
+                "type": "integer",
+                "minimum": 1,
+                "required": True,
+                "description": "压缩后保留的最近轮数（下限）",
+            },
+        },
+        "handler": "_do_update_compressor",
+    },
+    # ===== 独立路径指令：自带 turn 边界/归档/作废，不走通用指令分发 =====
     "regenerate": {
         "aliases": [":rerun", "/rerun", ":regenerate"],
         "description": "重跑当前最后一条人类消息对应轮（复用工具结果，作废旧回答）",
@@ -102,7 +124,9 @@ def is_known(name: str) -> bool:
 
 
 def handler_for(name: str | None) -> str:
-    """返回该指令的分派方法名（运行时 getattr(self, name) 调用）；未注册指令抛 KeyError"""
+    """返回该指令的分派方法名（运行时 getattr(self, name) 调用）；None/未注册指令抛 KeyError"""
+    if name is None:
+        raise KeyError(name)
     return INSTRUCTION_SPECS[name]["handler"]
 
 
@@ -111,7 +135,4 @@ def build_public_specs() -> list[dict[str, Any]]:
 
     每条包含 name（前端据此发 POST /commands 的 action）与 aliases/description/scope/payload。
     """
-    return [
-        {"name": name, **{k: v for k, v in spec.items() if k != "handler"}}
-        for name, spec in INSTRUCTION_SPECS.items()
-    ]
+    return [{"name": name, **{k: v for k, v in spec.items() if k != "handler"}} for name, spec in INSTRUCTION_SPECS.items()]

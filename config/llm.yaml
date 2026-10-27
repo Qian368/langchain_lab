@@ -15,6 +15,7 @@ llm:
       base_url: https://api.deepseek.com/v1
       temperature: 0.7
       max_tokens: 3000
+      context_window: 128000   # 模型上下文窗口（token；压缩保留预算 = 窗口 × (1 - headroom)）
 
     zhipuai:
       provider: openai
@@ -23,14 +24,17 @@ llm:
       base_url: https://open.bigmodel.cn/api/paas/v4/
       temperature: 0.7
       max_tokens: 3000
+      context_window: 128000   # 模型上下文窗口（token）
 
     qwen:
       provider: openai            # 用 OpenAI 兼容协议接通义
       model: qwen-plus
       api_key: ${DASHSCOPE_API_KEY}
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      context_window: 128000   # 模型上下文窗口（token）
 
     local:
       provider: ollama            # 本地模型不需要 api_key
       model: qwen3:8b
       base_url: http://localhost:11434/v1
+      context_window: 32768    # 本地小模型窗口较小

@@ -19,6 +19,7 @@
 - 运行上限（max_llm_loop/max_tool_calls）由入口按 runtime.yaml 注入；不碰 MCP 连接
 - 事件通道抽象：依赖 EventChannel（Port），不感知底层是内存总线还是 MQ
 """
+
 import asyncio
 import inspect
 import json
@@ -36,11 +37,11 @@ from langchain_core.messages import (
     messages_to_dict,
 )
 
-from langchain_lab.core.agent_hooks import AgentHooks
+from langchain_lab.core.bus.event_bus import EventChannel
+from langchain_lab.core.bus.events import Event, EventType
 from langchain_lab.core.commands.instruction_registry import get_spec, handler_for
 from langchain_lab.core.context.compressor import SessionCompressor
-from langchain_lab.core.event_bus import EventChannel
-from langchain_lab.core.events import Event, EventType
+from langchain_lab.core.runtime.agent_hooks import AgentHooks
 from langchain_lab.core.tools.tool_disclosure import get_disclosure_tools
 from langchain_lab.core.tools.tool_middleware import execute_safe_tool_call
 
@@ -81,9 +82,7 @@ class ChatSession:
         self._max_llm_loop = max_llm_loop
         self._max_tool_calls = max_tool_calls
         # 恢复时注入视图历史（含 system/摘要），否则新建用 system_prompt 打底
-        self._messages: list[BaseMessage] = (
-            history if history is not None else [SystemMessage(content=system_prompt)]
-        )
+        self._messages: list[BaseMessage] = history if history is not None else [SystemMessage(content=system_prompt)]
         self._summary: str | None = summary  # 会话级压缩摘要
         self._branch_loader = branch_loader
         self._branch_lister = branch_lister
@@ -92,6 +91,7 @@ class ChatSession:
         self._session_renamer = session_renamer
         self._branch_renamer = branch_renamer
         self._compress_lock = asyncio.Lock()  # 压缩串行化（自动/手动并发不竞态）
+        self._actual_tokens = 0  # 累计实际 token（每轮流式 usage_metadata 累加），自动压缩预算判断用
         # 订阅输入事件（定向订阅自己的 session_id，O(1) 投递，不被其他会话事件触发）
         bus.subscribe(self._on_user_message, EventType.USER_MESSAGE_SUBMITTED, session_id=self._session_id)
         bus.subscribe(self._on_compress_requested, EventType.COMPRESS_REQUESTED, session_id=self._session_id)
@@ -107,6 +107,19 @@ class ChatSession:
         if inspect.isawaitable(result):
             result = await result
         return arg if result is None else result
+
+    @staticmethod
+    def _usage_tokens(chunk) -> int | None:
+        """从 LLM chunk 提取实际 token（usage_metadata）；无用量信息返回 None（调用方退化为轮数判断）"""
+        meta = getattr(chunk, "usage_metadata", None)
+        if meta is None:
+            return None
+        if isinstance(meta, dict):
+            return meta.get("total_tokens") or (meta.get("input_tokens", 0) + meta.get("output_tokens", 0))
+        total = getattr(meta, "total_tokens", None)
+        if total:
+            return total
+        return (getattr(meta, "input_tokens", 0) or 0) + (getattr(meta, "output_tokens", 0) or 0)
 
     # —— 输入事件（async handler，由通道后台调度；定向订阅已保证是本站会话事件）——
     def _on_user_message(self, event: Event):
@@ -129,7 +142,7 @@ class ChatSession:
             return
         async with self._compress_lock:
             new_summary = await self._compressor.maybe_compress(
-                self._messages, self._summary, force=force, keep_turns=keep
+                self._messages, self._summary, force=force, keep_recent_turns=keep, actual_tokens=self._actual_tokens
             )
             if new_summary is not None:
                 self._summary = new_summary
@@ -192,7 +205,7 @@ class ChatSession:
             self._notice("暂无分支")
             return
         lines = [
-            f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}  {b.get('name','')}"
+            f"  {b['branch_id']}  parent={b['parent_id'] or '-'}  point={b['branch_point_seq']}  {b.get('name', '')}"
             + (" *" if b["branch_id"] == self._branch_id else "")
             for b in branches
         ]
@@ -295,6 +308,27 @@ class ChatSession:
             await self._branch_renamer(self._branch_id, name)
             self._notice(f"分支 {self._branch_id} 已重命名为「{name}」")
 
+    async def _do_update_compressor(self, payload) -> None:
+        """更新上下文压缩器配置：保留轮数下限 + 保留预算（token）"""
+        keep_recent_turns = payload.get("keep_recent_turns")
+        retention_budget = payload.get("retention_budget")
+
+        if not isinstance(keep_recent_turns, int) or keep_recent_turns < 1:
+            self._notice("keep_recent_turns 必须是 ≥1 的整数")
+            return
+        if not isinstance(retention_budget, int) or retention_budget < 1:
+            self._notice("retention_budget 必须是 ≥1 的整数（token）")
+            return
+        if keep_recent_turns * 64 > retention_budget:
+            self._notice("保留轮数对应的 token 估算不能超过 retention_budget")
+
+        if self._compressor is None:
+            self._notice("压缩器实例未初始化，无法更新配置")
+            return
+
+        self._compressor.update_config(keep_recent_turns=keep_recent_turns, retention_budget=retention_budget)
+        self._notice(f"压缩器配置已更新：keep_recent_turns={keep_recent_turns}, retention_budget={retention_budget}")
+
     # —— 重跑：只允许当前最后一条人类消息对应轮，复用工具结果，条件化注解，新回答归档、旧回答作废 ——
     async def _do_regenerate(self) -> None:
         """重跑当前最后一条人类消息对应轮：
@@ -305,11 +339,7 @@ class ChatSession:
         - 新回答 append _messages 并增量归档；旧回答发 MESSAGE_SUPERSEDED 由 store 软删（前端只看到新回答）
         - 自带 turn 边界/归档/作废/flush，独立于 _handle_command_event（避免双重 turn 边界）
         """
-        human_idxs = [
-            i
-            for i, m in enumerate(self._messages)
-            if isinstance(m, HumanMessage) and m.additional_kwargs.get("meta") != "summary"
-        ]
+        human_idxs = [i for i, m in enumerate(self._messages) if isinstance(m, HumanMessage) and m.additional_kwargs.get("meta") != "summary"]
         if not human_idxs:
             self._notice("没有可重跑的轮次（暂无用户消息）")
             return
@@ -401,13 +431,7 @@ class ChatSession:
     def _archive_new_messages(self, start_idx: int) -> None:
         """增量归档本轮新增真实消息（human/ai/tool，排除 system 与 meta=summary 摘要），append 落库"""
         new_msgs = self._messages[start_idx:]
-        real = messages_to_dict(
-            [
-                m
-                for m in new_msgs
-                if not (isinstance(m, SystemMessage) or m.additional_kwargs.get("meta") == "summary")
-            ]
-        )
+        real = messages_to_dict([m for m in new_msgs if not (isinstance(m, SystemMessage) or m.additional_kwargs.get("meta") == "summary")])
         if real:
             self._emit(
                 EventType.MESSAGES_ARCHIVED,
@@ -484,6 +508,7 @@ class ChatSession:
                 if chunk.content:
                     self._emit(EventType.STREAM_CHUNK, payload=chunk.content)
 
+            self._emit(EventType.FINISH_STREAM_CHUNK)
             if not full_chunk:
                 break
 
@@ -492,6 +517,10 @@ class ChatSession:
             if full_chunk is None:
                 break
             self._messages.append(full_chunk)
+            # 实际 token 累计（真实消耗）：chunk 有 usage_metadata 则累加；无（如测试 fake）则保持 None 语义 → 退化为轮数判断
+            usage = self._usage_tokens(full_chunk)
+            if usage is not None:
+                self._actual_tokens += usage
             # 完整消息事件：payload 用 messages_to_dict（JSON 可序列化，MQ 契约）；展示层看流式+状态，不依赖此 payload 内容
             self._emit(EventType.ASSISTANT_MESSAGE_EMITTED, payload=messages_to_dict([full_chunk]))
 
@@ -509,9 +538,7 @@ class ChatSession:
                         EventType.TOOL_CALL_START,
                         payload={"name": tc["name"], "id": tc["id"], "args": tc["args"], "index": i},
                     )
-                    result = await execute_safe_tool_call(
-                        tool_call=tc, tools=self._tools, session_ctx=self._session_ctx, tool_index=i
-                    )
+                    result = await execute_safe_tool_call(tool_call=tc, tools=self._tools, session_ctx=self._session_ctx, tool_index=i)
                     # —— 控制钩子③ post_tool：工具执行结果校验/脱敏/替换（None=原样，dict=替换，raise=拒绝）——
                     result = await self._run_hook(self._hooks.post_tool, result)
                     self._messages.append(

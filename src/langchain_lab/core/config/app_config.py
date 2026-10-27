@@ -6,6 +6,7 @@
 
 from pydantic import Field
 
+from langchain_lab.core.config.app_schema.context_models import ContextSettings
 from langchain_lab.core.config.app_schema.llm_models import LLMConfig
 from langchain_lab.core.config.app_schema.mcp_models import MCPSettings
 from langchain_lab.core.config.app_schema.project_models import ProjectSettings
@@ -26,3 +27,4 @@ class AppConfig(EventedModel):
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)

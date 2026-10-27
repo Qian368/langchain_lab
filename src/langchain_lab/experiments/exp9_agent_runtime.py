@@ -11,11 +11,12 @@
 """
 
 import asyncio
+import json
 
-from langchain_lab.core.agent_runtime import AgentRuntime
+from langchain_lab.core.bus.event_bus import EventChannel
+from langchain_lab.core.bus.events import Event, EventType
 from langchain_lab.core.commands import INSTRUCTION_SPECS, get_spec
-from langchain_lab.core.event_bus import EventChannel
-from langchain_lab.core.events import Event, EventType
+from langchain_lab.core.runtime.agent_runtime import AgentRuntime
 from langchain_lab.util.prompt_style import Printer
 
 _DEFAULT_SESSION_NAME = "新会话"
@@ -23,11 +24,7 @@ _DEFAULT_SESSION_NAME = "新会话"
 
 def _build_alias_map() -> dict[str, str]:
     """从指令注册表构建 终端别名(alias) → action(name) 反查表（单一真相源）"""
-    return {
-        alias: name
-        for name, spec in INSTRUCTION_SPECS.items()
-        for alias in spec.get("aliases", [])
-    }
+    return {alias: name for name, spec in INSTRUCTION_SPECS.items() for alias in spec.get("aliases", [])}
 
 
 _ALIAS_TO_ACTION = _build_alias_map()
@@ -59,20 +56,27 @@ def _parse_command(text: str) -> tuple[EventType | None, dict | None]:
     assert spec is not None, f"未注册指令 action={action}"
     payload_fields = spec.get("payload") or {}
     payload: dict = {}
-    # 按注册表 schema 填充必填字段（终端单参数：取第一个 required 字段，类型转换 + 约束校验）
-    required = [f for f, m in payload_fields.items() if m.get("required")]
-    if required:
-        fname = required[0]
-        fmeta = payload_fields[fname]
-        if not arg:
-            return None, {"error": f"{cmd} 用法：{cmd} <{fname}>（{fmeta.get('description') or ''}）"}
-        try:
-            value: int | str = int(arg) if fmeta.get("type") == "integer" else arg
-        except ValueError:
-            return None, {"error": f"{cmd} 参数 {fname} 需为 {fmeta.get('type')}"}
-        if fmeta.get("minimum") is not None and isinstance(value, int) and value < fmeta["minimum"]:
-            return None, {"error": f"{cmd} 参数 {fname} 需 >= {fmeta['minimum']}"}
-        payload[fname] = value
+    # 按注册表 schema 填充必填字段（终端空格分隔多个必填参数，按 `required` 列表顺序依次赋值，类型转换 + 约束校验）
+    required_fields = {f: m for f, m in payload_fields.items() if m.get("required")}
+    required_field_names = [f for f, m in required_fields.items()]
+    # 替换原来 required 块
+    if required_field_names:
+        raw_args = arg.split()
+        if len(raw_args) < len(required_field_names):
+            hints = [f"<{f}>" for f in required_field_names]
+            return None, {
+                "error": f"{cmd} 用法格式：{cmd} {' '.join(hints)}\n 具体说明：\n{json.dumps(required_fields, ensure_ascii=False, indent=2)}"
+            }
+        for idx, fname in enumerate(required_field_names):
+            fmeta = payload_fields[fname]
+            raw_val = raw_args[idx]
+            try:
+                value = int(raw_val) if fmeta.get("type") == "integer" else raw_val
+            except ValueError:
+                return None, {"error": f"{cmd} 参数 {fname} 需为 {fmeta.get('type')}"}
+            if fmeta.get("minimum") is not None and isinstance(value, int) and value < fmeta["minimum"]:
+                return None, {"error": f"{cmd} 参数 {fname} 需 >= {fmeta['minimum']}"}
+            payload[fname] = value
 
     return EventType.SESSION_COMMAND, {"action": action, **payload}
 
@@ -105,6 +109,7 @@ class _TerminalRenderer:
         EventType.SESSION_NOTICE,
         EventType.HUMAN_MESSAGE_RECEIVED,
         EventType.STREAM_CHUNK,
+        EventType.FINISH_STREAM_CHUNK,
         EventType.ASSISTANT_MESSAGE_EMITTED,  # 仅重置状态，不渲染内容（避免与流式重复）
         EventType.TOOL_CALL_START,
         EventType.TOOL_RESULT,
@@ -142,6 +147,7 @@ class _TerminalRenderer:
             EventType.SESSION_NOTICE: self._on_notice,
             EventType.HUMAN_MESSAGE_RECEIVED: self._on_human_message,
             EventType.STREAM_CHUNK: self._on_stream_chunk,
+            EventType.FINISH_STREAM_CHUNK: self._on_finish_stream_chunk,
             EventType.ASSISTANT_MESSAGE_EMITTED: self._on_assistant_emitted,
             EventType.TOOL_CALL_START: self._on_tool_call_start,
             EventType.TOOL_RESULT: self._on_tool_result,
@@ -167,14 +173,21 @@ class _TerminalRenderer:
         self._printer.info(str(event.payload))
 
     def _on_human_message(self, event: Event) -> None:
-        self._printer.label_blue("你 > ")
-        self._printer.blue(str(event.payload))
+        print()
+        # 这里不做回显 响应
+        # self._printer.label_blue("你 > ")
+        # self._printer.blue(str(event.payload))
 
     def _on_stream_chunk(self, event: Event) -> None:
         if self._expect_reply_start:
             self._printer.label_blue("模型答复> ")
             self._expect_reply_start = False
         self._printer.stream_chunk(str(event.payload), style_name=self._printer.style_name.MAGENTA)
+
+    def _on_finish_stream_chunk(self, event: Event) -> None:
+        print()
+        self._printer.label_blue("<答复完成")
+        print()
 
     def _on_assistant_emitted(self, event: Event) -> None:
         self._expect_reply_start = True
@@ -190,8 +203,9 @@ class _TerminalRenderer:
 
     def _on_context_compressed(self, event: Event) -> None:
         p = event.payload
-        forced = "[手动]" if p.get("forced") else "[自动]"
-        self._printer.label_yellow(f"{forced}上下文压缩] 早期 {p.get('compressed_turns', '?')} 轮已折叠为摘要")
+
+        forced = "[手动" if p.get("forced") else "[自动"
+        self._printer.label_yellow(f"{forced}上下文压缩] 早期 {p.get('compressed_turns', '?')} 轮已压缩为摘要")
 
     def _on_error(self, event: Event) -> None:
         p = event.payload or {}

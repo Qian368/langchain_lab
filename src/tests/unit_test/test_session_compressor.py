@@ -2,14 +2,15 @@
 
 覆盖 KV 前缀一致性：压缩请求 = 视图去掉最近 keep 轮【原封不动】+ 追加固定 Human 指令。
 """
+
 import asyncio
 from types import SimpleNamespace
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from langchain_lab.core.bus.event_bus import EventBus
+from langchain_lab.core.bus.events import EventType
 from langchain_lab.core.context.compressor import SessionCompressor
-from langchain_lab.core.event_bus import EventBus
-from langchain_lab.core.events import EventType
 
 
 class _FakeLlm:
@@ -72,7 +73,7 @@ def test_force_compress_early():
     bus.subscribe(EventType.CONTEXT_COMPRESSED, lambda e: seen.append(e.payload))
     comp = SessionCompressor(_FakeLlm(), keep_recent_turns=6, bus=bus, session_id="s1")
 
-    summary = asyncio.run(comp.maybe_compress(_msgs_with_turns(4), None, force=True, keep_turns=2))
+    summary = asyncio.run(comp.maybe_compress(_msgs_with_turns(4), None, force=True, keep_recent_turns=2))
     assert summary == "压缩摘要"
     assert seen[0]["compressed_turns"] == 2  # 4 轮保留最近 2 轮，压前 2 轮
     assert seen[0]["forced"] is True  # 手动触发标记，前端可感知

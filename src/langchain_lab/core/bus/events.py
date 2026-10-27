@@ -17,6 +17,7 @@
 - event_id：源头唯一标识，MQ 幂等去重（at-least-once 下重复投递去重，不乱序）
 - schema_version：payload 结构版本，MQ 跨版本消费
 """
+
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -44,6 +45,7 @@ class EventType(StrEnum):
     # —— 过程事件：逐片/即时，给展示（流式打字、工具进度）——
     HUMAN_MESSAGE_RECEIVED = "human_message_received"  # 会话追加用户消息后的回显
     STREAM_CHUNK = "stream_chunk"
+    FINISH_STREAM_CHUNK = "finish_stream_chunk"
     TOOL_CALL_START = "tool_call_start"
     TOOL_RESULT = "tool_result"
     # —— 完整事件：累积完成，给持久化/完整语义 ——

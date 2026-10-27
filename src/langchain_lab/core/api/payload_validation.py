@@ -5,11 +5,13 @@
 动态生成每个指令的校验模型，避免"每个指令手写一个 Pydantic 类 + 注册表各写一份字段"。
 校验是 API 层的事（FastAPI/Pydantic），注册表只提供 schema，二者不重复实现。
 """
+
 from __future__ import annotations
 
 from functools import cache
+from typing import Any
 
-from pydantic import Field, create_model
+from pydantic import BaseModel, Field, create_model
 
 from langchain_lab.core.commands import get_spec
 
@@ -17,11 +19,11 @@ _TYPE_MAP = {"integer": int, "string": str}
 
 
 @cache
-def _model_for(action: str) -> type:
+def _model_for(action: str) -> type[BaseModel]:
     """按注册表 payload schema 动态生成该指令的校验模型（缓存）"""
     spec = get_spec(action)
     payload = (spec or {}).get("payload") or {}
-    fields: dict[str, tuple] = {}
+    fields: dict[str, Any] = {}
     for fname, meta in payload.items():
         typ = _TYPE_MAP.get(meta.get("type"), str)
         kwargs: dict = {"description": meta.get("description")}

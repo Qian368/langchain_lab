@@ -5,6 +5,7 @@
 - 新回答增量归档；旧回答发 MESSAGE_SUPERSEDED 由 store 软删（load_view 只见新回答）
 - 全部走事件总线，不连真实 LLM/工具
 """
+
 import asyncio
 import os
 import tempfile
@@ -19,11 +20,11 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import tool
 
-from langchain_lab.core.agent_session import ChatSession
+from langchain_lab.core.bus.event_bus import EventBus
+from langchain_lab.core.bus.events import Event, EventType
 from langchain_lab.core.context.context_store import ContextStore
 from langchain_lab.core.context.views import build_display_context
-from langchain_lab.core.event_bus import EventBus
-from langchain_lab.core.events import Event, EventType
+from langchain_lab.core.runtime.agent_session import ChatSession
 
 
 class _FakeStream:
@@ -74,9 +75,12 @@ def test_display_context_filters_system_with_summary():
     msgs = [
         SystemMessage("sys"),
         HumanMessage("[对话历史摘要]\nsum", additional_kwargs={"meta": "summary"}),
-        HumanMessage("h0"), AIMessage("a0"),
-        HumanMessage("h1"), AIMessage("a1"),
-        HumanMessage("h2"), AIMessage("a2"),
+        HumanMessage("h0"),
+        AIMessage("a0"),
+        HumanMessage("h1"),
+        AIMessage("a1"),
+        HumanMessage("h2"),
+        AIMessage("a2"),
     ]
     ctx = build_display_context(msgs, "sum", 2)  # keep=2
     kinds = [item["kind"] for item in ctx]
@@ -89,6 +93,7 @@ def test_display_context_filters_system_with_summary():
 # —— regenerate：无工具轮（不注入注解）——
 def test_regenerate_no_tools_no_annotation():
     """无工具调用轮：重跑不注入 meta=rerun 注解，只重新生成回答，旧回答作废"""
+
     async def scenario():
         bus = EventBus()
         seen = []
@@ -96,8 +101,12 @@ def test_regenerate_no_tools_no_annotation():
         bus.subscribe(EventType.MESSAGE_SUPERSEDED, lambda e: superseded.append(e.payload))
         msgs = [SystemMessage("sys"), HumanMessage("h0"), AIMessage("a0"), HumanMessage("h1"), AIMessage("旧回答")]
         chat = ChatSession(
-            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
-            bus=bus, llm=_FakeLlm([AIMessageChunk(content="新回答")], seen), tools=[], history=msgs,
+            session_id="s1",
+            session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus,
+            llm=_FakeLlm([AIMessageChunk(content="新回答")], seen),
+            tools=[],
+            history=msgs,
         )
         bus.publish(Event(EventType.SESSION_COMMAND, "s1", {"action": "regenerate"}))
         await bus.flush()
@@ -116,21 +125,28 @@ def test_regenerate_no_tools_no_annotation():
 # —— regenerate：有工具轮（条件化注入注解，临时不进 _messages）——
 def test_regenerate_with_tools_conditional_annotation():
     """有工具调用轮：重跑注入 meta=rerun 注解（LLM 可见），复用工具结果，新回答归档，旧回答作废"""
+
     async def scenario():
         bus = EventBus()
         seen = []
         archived = []
         bus.subscribe(EventType.MESSAGES_ARCHIVED, lambda e: archived.append(e.payload))
         msgs = [
-            SystemMessage("sys"), HumanMessage("h0"), AIMessage("a0"),
+            SystemMessage("sys"),
+            HumanMessage("h0"),
+            AIMessage("a0"),
             HumanMessage("h1"),
             AIMessage(content="", tool_calls=[{"name": "t", "id": "c1", "args": {}}]),
             ToolMessage(content='{"r":1}', tool_call_id="c1", name="t"),
             AIMessage("旧回答"),
         ]
         chat = ChatSession(
-            session_id="s1", session_ctx={"user_id": "u1", "tenant_id": "t1"},
-            bus=bus, llm=_FakeLlm([AIMessageChunk(content="新回答")], seen), tools=[], history=msgs,
+            session_id="s1",
+            session_ctx={"user_id": "u1", "tenant_id": "t1"},
+            bus=bus,
+            llm=_FakeLlm([AIMessageChunk(content="新回答")], seen),
+            tools=[],
+            history=msgs,
         )
         bus.publish(Event(EventType.SESSION_COMMAND, "s1", {"action": "regenerate"}))
         await bus.flush()
@@ -152,6 +168,7 @@ def test_regenerate_with_tools_conditional_annotation():
 # —— store：MESSAGE_SUPERSEDED 软删旧回答（load_view 只见新回答）——
 def test_supersede_soft_deletes_old_answer():
     """作废旧回答软删：archive 里匹配的 AI 消息置 deleted=1，重建/恢复视图不再出现"""
+
     async def scenario():
         with tempfile.TemporaryDirectory() as td:
             store = ContextStore(os.path.join(td, "t.db"))

@@ -17,13 +17,14 @@ handler 必须可重入幂等（at-least-once 会重复投递，event_id 去重�
 - 旧式通配：subscribe(event_type, handler)
 - 新式定向/通配：subscribe(handler, event_type, session_id=session_id or None)
 """
+
 import asyncio
 import contextlib
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Protocol
 
-from langchain_lab.core.events import Event, EventType
+from langchain_lab.core.bus.events import Event, EventType
 
 # 同步 handler 直接返回；异步 handler 返回协程
 Handler = Callable[[Event], None] | Callable[[Event], Awaitable[None]]

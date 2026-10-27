@@ -16,6 +16,7 @@
   SUMMARY_ARCHIVED（摘要消息按分支落 archive，由 ChatSession 携带当前 branch_id 发出）/ MESSAGE_SUPERSEDED（作废旧回答）。
 - 命名：sessions.name / branches.name（展示用，默认值、非唯一）。
 """
+
 import asyncio
 import contextlib
 import json
@@ -26,9 +27,9 @@ from pathlib import Path
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, messages_from_dict, messages_to_dict
 
+from langchain_lab.core.bus.event_bus import EventChannel
+from langchain_lab.core.bus.events import Event, EventType
 from langchain_lab.core.context.views import build_llm_context
-from langchain_lab.core.event_bus import EventChannel
-from langchain_lab.core.events import Event, EventType
 
 _DEFAULT_SYSTEM_PROMPT = "你是一个配合测试的助手，按照用户要求执行最小Agent循环任务"
 _DEFAULT_SESSION_NAME = "新会话"
@@ -41,6 +42,7 @@ class ContextStore:
         self._db_path = str(db_path)
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+
     @contextlib.contextmanager
     def _connect(self):
         """打开 SQLite 连接：事务提交 + 显式关闭。
@@ -156,14 +158,15 @@ class ContextStore:
         content = payload.get("superseded_content")
         if content is None:
             return
-        await asyncio.to_thread(
-            self._supersede_sync, event.session_id, payload.get("branch_id") or "root", content
-        )
+        await asyncio.to_thread(self._supersede_sync, event.session_id, payload.get("branch_id") or "root", content)
 
     # ===================== 注册 / 归档 =====================
     async def ensure_session(
-        self, session_id: str, session_ctx: dict | None = None,
-        system_prompt: str | None = None, name: str | None = None,
+        self,
+        session_id: str,
+        session_ctx: dict | None = None,
+        system_prompt: str | None = None,
+        name: str | None = None,
     ) -> None:
         """注册/更新会话行：存 user/tenant + system_prompt + name（恢复/新建用）。恢复传 system_prompt=None 保留已有"""
         await asyncio.to_thread(self._ensure_session_sync, session_id, session_ctx, system_prompt, name)
@@ -201,17 +204,12 @@ class ContextStore:
                     "INSERT OR IGNORE INTO message_archive(session_id, branch_id, event_id, seq, role, kind, "
                     "payload, deleted, created_at) VALUES(?,?,?,?,?,'message',?,0,?)"
                 ),
-                [
-                    (session_id, branch_id, event_id, i, d.get("type", ""), json.dumps(d, ensure_ascii=False), now)
-                    for i, d in enumerate(dicts)
-                ],
+                [(session_id, branch_id, event_id, i, d.get("type", ""), json.dumps(d, ensure_ascii=False), now) for i, d in enumerate(dicts)],
             )
 
     def _append_summary_sync(self, session_id, branch_id, event_id, summary) -> None:
         """摘要消息（kind=summary）append 进指定分支 archive；同一 event_id 幂等"""
-        msg_dict = messages_to_dict(
-            [HumanMessage(content=f"[对话历史摘要]\n{summary}", additional_kwargs={"meta": "summary"})]
-        )[0]
+        msg_dict = messages_to_dict([HumanMessage(content=f"[对话历史摘要]\n{summary}", additional_kwargs={"meta": "summary"})])[0]
         with self._connect() as conn:
             conn.execute(
                 (
@@ -272,17 +270,13 @@ class ContextStore:
         return messages_from_dict([json.loads(p) for (_k, p) in rows])
 
     # ===================== 读取（恢复视图 / 全量） =====================
-    async def load_view(
-        self, session_id: str, branch_id: str = "root", keep_recent_turns: int = 6
-    ) -> list[BaseMessage] | None:
+    async def load_view(self, session_id: str, branch_id: str = "root", keep_recent_turns: int = 6) -> list[BaseMessage] | None:
         """恢复视图：回溯完整历史 + 最近 kind=summary → build_llm_context（System + 摘要 + 最近 keep 轮）"""
         return await asyncio.to_thread(self._load_view_sync, session_id, branch_id, keep_recent_turns)
 
     def _load_view_sync(self, session_id, branch_id, keep):
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT system_prompt FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)
-            ).fetchone()
+            row = conn.execute("SELECT system_prompt FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)).fetchone()
             if row is None:
                 return None
             system_prompt = row[0]
@@ -295,7 +289,7 @@ class ContextStore:
                 # 归档摘要消息 content 已带展示前缀；build_llm_context 会再加前缀，这里剥离避免双前缀
                 content = d.get("data", {}).get("content") or d.get("content")
                 if content and content.startswith("[对话历史摘要]\n"):
-                    content = content[len("[对话历史摘要]\n"):]
+                    content = content[len("[对话历史摘要]\n") :]
                 summary = content  # 最近一条覆盖
             else:
                 real_dicts.append(d)
@@ -316,13 +310,15 @@ class ContextStore:
 
     # ===================== 分支（任意位置分叉，回溯拐点视图） =====================
     async def create_branch(
-        self, session_id: str, parent_id: str = "root", branch_point_seq: int | None = None,
-        keep_recent_turns: int = 6, name: str | None = None,
+        self,
+        session_id: str,
+        parent_id: str = "root",
+        branch_point_seq: int | None = None,
+        keep_recent_turns: int = 6,
+        name: str | None = None,
     ) -> tuple[str, list[BaseMessage]]:
         """在父分支任意位置分叉（含继承历史），返回 (new_id, 拐点视图)。拐点视图 = System + 父分支完整历史前 point 条"""
-        return await asyncio.to_thread(
-            self._create_branch_sync, session_id, parent_id, branch_point_seq, keep_recent_turns, name
-        )
+        return await asyncio.to_thread(self._create_branch_sync, session_id, parent_id, branch_point_seq, keep_recent_turns, name)
 
     def _create_branch_sync(self, session_id, parent_id, point, keep, name):
         if not isinstance(point, int) or point < 1:
@@ -366,10 +362,7 @@ class ContextStore:
                 ),
                 (session_id,),
             ).fetchall()
-        return [
-            {"branch_id": r[0], "parent_id": r[1], "branch_point_seq": r[2], "name": r[3], "created_at": r[4]}
-            for r in rows
-        ]
+        return [{"branch_id": r[0], "parent_id": r[1], "branch_point_seq": r[2], "name": r[3], "created_at": r[4]} for r in rows]
 
     # ===================== 两级删除 =====================
     def _collect_descendants(self, conn, session_id, branch_id) -> list[str]:
@@ -462,9 +455,7 @@ class ContextStore:
 
     def _load_summary_sync(self, session_id):
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT summary FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)
-            ).fetchone()
+            row = conn.execute("SELECT summary FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)).fetchone()
         if row is None or not row[0]:
             return None
         return row[0]
@@ -475,9 +466,7 @@ class ContextStore:
 
     def _load_system_prompt_sync(self, session_id):
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT system_prompt FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)
-            ).fetchone()
+            row = conn.execute("SELECT system_prompt FROM sessions WHERE session_id=? AND status!='deleted'", (session_id,)).fetchone()
         if row is None or not row[0]:
             return None
         return row[0]
@@ -494,10 +483,7 @@ class ContextStore:
                    ORDER BY updated_at DESC""",
                 (user_id, tenant_id),
             ).fetchall()
-        return [
-            {"session_id": r[0], "name": r[1], "status": r[2], "created_at": r[3], "updated_at": r[4]}
-            for r in rows
-        ]
+        return [{"session_id": r[0], "name": r[1], "status": r[2], "created_at": r[3], "updated_at": r[4]} for r in rows]
 
     # ===================== 作废（重跑旧回答） =====================
     def _supersede_sync(self, session_id, branch_id, content) -> None:

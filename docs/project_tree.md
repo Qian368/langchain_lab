@@ -1,6 +1,6 @@
 # 项目目录结构
 
-- 生成时间：`2026-10-27 02:26:35`
+- 生成时间：`2026-10-27 23:41:21`
 - 项目根目录：`E:\project-dev\ai-agent\practice\langchain_lab`
 
 ```text
@@ -9,6 +9,7 @@ langchain_lab/
 │   ├── launch.json
 │   └── settings.json
 ├── config/
+│   ├── context.yaml
 │   ├── llm.yaml
 │   ├── mcp.yaml
 │   ├── project.yaml
@@ -29,12 +30,17 @@ langchain_lab/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── control_api.py
 │   │   │   │   └── payload_validation.py
+│   │   │   ├── bus/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── event_bus.py
+│   │   │   │   └── events.py
 │   │   │   ├── commands/
 │   │   │   │   ├── __init__.py
 │   │   │   │   └── instruction_registry.py
 │   │   │   ├── config/
 │   │   │   │   ├── app_schema/
 │   │   │   │   │   ├── __init__.py
+│   │   │   │   │   ├── context_models.py
 │   │   │   │   │   ├── llm_models.py
 │   │   │   │   │   ├── mcp_models.py
 │   │   │   │   │   ├── project_models.py
@@ -57,17 +63,17 @@ langchain_lab/
 │   │   │   │   └── views.py
 │   │   │   ├── llm/
 │   │   │   │   └── llm.py
+│   │   │   ├── runtime/
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── agent_hooks.py
+│   │   │   │   ├── agent_runtime.py
+│   │   │   │   └── agent_session.py
 │   │   │   ├── tools/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── base_tools.py
 │   │   │   │   ├── tool_disclosure.py
 │   │   │   │   └── tool_middleware.py
 │   │   │   ├── __init__.py
-│   │   │   ├── agent_hooks.py
-│   │   │   ├── agent_runtime.py
-│   │   │   ├── agent_session.py
-│   │   │   ├── event_bus.py
-│   │   │   ├── events.py
 │   │   │   ├── messages.py
 │   │   │   └── pipeline.py
 │   │   ├── experiments/
@@ -148,8 +154,6 @@ langchain_lab/
 ├── .env.example
 ├── .gitignore
 ├── .python-version
-├── _diag_t.py
-├── _diag_turn.py
 ├── compose.yml
 ├── gen_tree.py
 ├── pyproject.toml

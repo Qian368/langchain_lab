@@ -26,6 +26,9 @@ class LLMInstanceConfig(EventedModel):
     base_url: str | None = Field(default=None, description="API 基础地址，不填用 SDK 默认")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="采样温度")
     max_tokens: int = Field(default=2048, gt=0, description="最大输出 token 数")
+    context_window: int = Field(
+        default=128000, ge=1000, description="模型上下文窗口（token，原始值；压缩保留预算按此 × 预留比例计算）"
+    )
     timeout: float | None = Field(default=None, gt=0, description="请求超时（秒）")
     max_retries: int | None = Field(default=None, ge=0, description="最大重试次数")
     extra_headers: dict[str, str] | None = Field(default=None, description="额外请求头")

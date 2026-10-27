@@ -9,6 +9,7 @@ from pydantic_settings import (
 )
 
 from langchain_lab.core.config.app_config import AppConfig
+from langchain_lab.core.config.app_schema.context_models import ContextSettings
 from langchain_lab.core.config.app_schema.llm_models import LLMConfig
 from langchain_lab.core.config.app_schema.mcp_models import MCPSettings
 from langchain_lab.core.config.app_schema.project_models import ProjectSettings
@@ -24,6 +25,7 @@ class ConfigLoader(BaseSettings):
             "config/mcp.yaml",
             "config/llm.yaml",
             "config/runtime.yaml",
+            "config/context.yaml",
         ],
         env_file=".env",
         env_nested_delimiter="__",
@@ -35,6 +37,7 @@ class ConfigLoader(BaseSettings):
     mcp: MCPSettings = Field(default_factory=MCPSettings)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
+    context: ContextSettings = Field(default_factory=ContextSettings)
 
     @classmethod
     def settings_customise_sources(
@@ -82,4 +85,5 @@ def load_config() -> AppConfig:
         mcp=config.mcp,
         llm=config.llm,
         runtime=config.runtime,
+        context=config.context,
     )

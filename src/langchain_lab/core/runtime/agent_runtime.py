@@ -11,16 +11,17 @@
 - 系统提示词/运行上限/压缩配置：全部由 AgentRuntime 从全局配置加载并注入，前端不支持自定义
 - 事件通道：持有 EventChannel（默认 EventBus 内存实现）；close 走 channel.close()（flush+清空订阅），停机语义统一
 """
+
 import asyncio
 import uuid
 
-from langchain_lab.core.agent_session import ChatSession
+from langchain_lab.core.bus.event_bus import EventBus, EventChannel
+from langchain_lab.core.bus.events import Event, EventType
 from langchain_lab.core.config.config_core import get_config
 from langchain_lab.core.context.compressor import SessionCompressor
 from langchain_lab.core.context.context_store import ContextStore
-from langchain_lab.core.event_bus import EventBus, EventChannel
-from langchain_lab.core.events import Event, EventType
 from langchain_lab.core.llm.llm import build_llm, get_llm
+from langchain_lab.core.runtime.agent_session import ChatSession
 from langchain_lab.core.tools.tool_disclosure import get_init_tools
 
 _DEFAULT_SESSION_NAME = "新会话"
@@ -33,8 +34,14 @@ class AgentRuntime:
         self._cfg = get_config()
         self._session_ctx = session_ctx or dict(self._cfg.project.session_ctx)  # 身份字典（含 user/tenant）
         self._agent_cfg = self._cfg.runtime.agent
-        self._comp_cfg = self._cfg.runtime.compression
-        self._keep_recent_turns = self._comp_cfg.keep_recent_turns
+        self._comp_cfg = self._cfg.context.compression  # 压缩执行配置已归 context 域（compression 子配置）
+        self._context_cfg = self._cfg.context  # 上下文策略（keep_recent_turns 下限 + headroom）
+        self._keep_recent_turns = self._context_cfg.keep_recent_turns
+        # 保留预算 = 主对话 LLM 上下文窗口 × (1 - headroom)；窗口来自 llm 配置（模型能力，跟模型走）
+        _insts = self._cfg.llm.instances
+        _default = self._cfg.llm.default_instance
+        _main = _insts.get(_default) if _default else (next(iter(_insts.values())) if _insts else None)
+        self._retention_budget = self._context_cfg.retention_budget(_main.context_window if _main else 128000)
         self._db_path = str(db_path or self._agent_cfg.session_db_path)
         self._bus: EventChannel = EventBus()
         self._store = ContextStore(self._db_path)
@@ -61,9 +68,7 @@ class AgentRuntime:
     # —— 会话查询 ——
     async def list_sessions(self) -> list[dict]:
         """按身份(user/tenant)列出非删除会话（供接入层选择 UI）"""
-        return await self._store.list_sessions(
-            self._session_ctx.get("user_id", ""), self._session_ctx.get("tenant_id", "")
-        )
+        return await self._store.list_sessions(self._session_ctx.get("user_id", ""), self._session_ctx.get("tenant_id", ""))
 
     def get(self, session_id: str) -> ChatSession | None:
         return self._sessions.get(session_id)
@@ -110,6 +115,7 @@ class AgentRuntime:
             await chat.close()
         await self._bus.close()  # flush 后台任务 + 清空订阅（停机语义，统一走 channel）
         from langchain_lab.mcp.client.mcp_session_manager import _session_mgr
+
         await _session_mgr.clear_all()
 
     # —— 内部 ——
@@ -124,10 +130,18 @@ class AgentRuntime:
             compressor = self._build_compressor(session_id)
             self._compressor_cache[session_id] = compressor
         return ChatSession(
-            session_id=session_id, session_ctx=self._session_ctx, bus=self._bus, llm=self._llm, tools=self._tools,
-            compressor=compressor, branch_id=branch_id, system_prompt=self._agent_cfg.default_system_prompt,
-            max_llm_loop=self._agent_cfg.max_llm_loop, max_tool_calls=self._agent_cfg.max_tool_calls,
-            history=history, summary=summary,
+            session_id=session_id,
+            session_ctx=self._session_ctx,
+            bus=self._bus,
+            llm=self._llm,
+            tools=self._tools,
+            compressor=compressor,
+            branch_id=branch_id,
+            system_prompt=self._agent_cfg.default_system_prompt,
+            max_llm_loop=self._agent_cfg.max_llm_loop,
+            max_tool_calls=self._agent_cfg.max_tool_calls,
+            history=history,
+            summary=summary,
             branch_loader=lambda bid: self._store.load_view(session_id, bid, self._keep_recent_turns),
             branch_lister=lambda: self._store.list_branches(session_id),
             branch_creator=lambda parent, point: self._store.create_branch(session_id, parent, point),
@@ -144,6 +158,10 @@ class AgentRuntime:
             raise ValueError(f"压缩摘要模型实例 '{inst_name}' 未在 config/llm.yaml 中配置")
         summarize_llm = build_llm(self._cfg.llm.instances[inst_name])
         return SessionCompressor(
-            summarize_llm=summarize_llm, keep_recent_turns=self._keep_recent_turns,
-            summarize_prompt=self._comp_cfg.summarize_prompt, bus=self._bus, session_id=session_id,
+            summarize_llm=summarize_llm,
+            keep_recent_turns=self._keep_recent_turns,
+            retention_budget=self._retention_budget,
+            summarize_prompt=self._comp_cfg.summarize_prompt,
+            bus=self._bus,
+            session_id=session_id,
         )
